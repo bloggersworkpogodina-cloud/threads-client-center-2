@@ -1,0 +1,14 @@
+THREADS CLIENT CENTER 2.0 — LOCAL CHECKS
+
+1. Python compilation: OK
+2. Dependencies installation: OK
+3. Module imports (bot.py, db.py, google_sheets.py): OK
+4. SQLite migrations: OK
+5. Client creation: OK
+6. Active Threads username duplicate protection: OK
+7. Invite binding and repeat binding: OK
+8. Sheet/content-plan/topic persistence: OK
+9. Client archive without deletion: OK
+10. Reuse username after archive: OK
+
+Telegram, Railway Volume and real Google Sheets access must be tested after deployment.
