@@ -192,7 +192,7 @@ async def add_client_threads(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(threads=(message.text or "").strip())
     await state.set_state(AddClient.telegram_link)
-    await message.answer("Введите Telegram-ссылку клиента или отправьте «-»:")
+    await message.answer("Введите Telegram username клиента без @ или отправьте «-»:")
 
 
 @router.message(AddClient.telegram_link)
@@ -200,11 +200,17 @@ async def add_client_finish(message: Message, state: FSMContext, bot: Bot) -> No
     if not is_admin(message.from_user.id):
         return
     data = await state.get_data()
-    link = (message.text or "").strip()
-    link = None if link == "-" else link
-    if link and not valid_url(link):
-        await message.answer("Нужна полная ссылка http/https или «-».")
-        return
+    value = (message.text or "").strip()
+    if value == "-":
+        link = None
+    else:
+        username = value.lstrip("@").strip()
+        if username.startswith("https://t.me/") or username.startswith("http://t.me/"):
+            username = username.rstrip("/").rsplit("/", 1)[-1].lstrip("@")
+        if not username or any(char.isspace() for char in username):
+            await message.answer("Введите Telegram username без @ или отправьте «-».")
+            return
+        link = f"https://t.me/{username}"
     try:
         client = await db.add_client(data["name"], data["threads"], link)
     except ClientAlreadyExistsError as exc:
