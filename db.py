@@ -237,7 +237,7 @@ class Database:
                 await conn.execute(
                     """INSERT OR IGNORE INTO daily_posts(client_id, post_date, slot, body, source_row, sent_at)
                     VALUES (?, ?, ?, ?, ?, ?)""",
-                    (client_id, post_date, post.get("time"), post["text"], idx, datetime.utcnow().isoformat()),
+                    (client_id, post_date, post.get("time"), post["text"], int(post.get("source_row", idx)), datetime.utcnow().isoformat()),
                 )
             await conn.commit()
             return await (await conn.execute("SELECT * FROM daily_posts WHERE client_id=? AND post_date=? ORDER BY slot", (client_id, post_date))).fetchall()

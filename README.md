@@ -1,23 +1,38 @@
-# THREADS CLIENT CENTER 2.0
+# THREADS CLIENT CENTER 2.0 — этап 1: контент
 
-## Railway
-1. Mount Volume at `/data`.
-2. Set `DB_PATH=/data/bot.db`.
-3. Add BOT_TOKEN, ADMIN_ID, WORK_GROUP_ID, GOOGLE_SERVICE_ACCOUNT_JSON, TIMEZONE.
-4. Add bot to forum supergroup as admin with topic permissions.
-5. Deploy. Migrations run before polling.
+## Railway Variables
+
+Обязательные:
+
+- `BOT_TOKEN`
+- `ADMIN_ID`
+- `WORK_GROUP_ID`
+- `DB_PATH=/data/bot.db`
+- `GOOGLE_SERVICE_ACCOUNT_JSON` — весь JSON сервисного аккаунта Google одной переменной
+- `TIMEZONE=Europe/Moscow`
+- `DAILY_SEND_HOUR=8`
+- `CONFIRMATION_HOUR=20`
 
 ## Google Sheets
-First sheet headers: `Дата`, `Время`, `Ветка`, `Статус`. Only `Готово` rows for today are sent.
 
-## Local test
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-PYTHONPATH=. python tests/smoke_test.py
-python -m compileall .
-```
+Первая строка первого листа:
 
-## Important
-This build includes the agreed architecture and core flows. Telegram forum permissions, real Google credentials, Railway Volume persistence and scheduled delivery must still be verified in the live environment.
+| Дата | Время | Ветка | Статус |
+|---|---|---|---|
+
+Поддерживаются даты `ДД.ММ.ГГГГ` и `YYYY-MM-DD`.
+Бот отправляет только строки на текущую дату со статусом `Готово`.
+
+Таблицу необходимо расшарить email сервисного аккаунта из поля `client_email` JSON-файла.
+Достаточно роли `Читатель`.
+
+## Проверка
+
+1. В карточке клиента нажать `📊 Таблица`.
+2. Отправить полную ссылку Google Sheets.
+3. Бот проверит доступ и обязательные колонки до сохранения.
+4. Нажать `📤 Отправить ветки`.
+5. Клиент должен получить каждую ветку отдельным сообщением.
+6. В рабочей теме появится запись об отправке.
+
+Автоматическая отправка запускается ежедневно в `DAILY_SEND_HOUR` по `TIMEZONE`.

@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow
 from keyboards import admin_menu, client_card_kb, confirm_client_kb
 from topics import ensure_topic, topic_log
+from posts import send_today_posts
 
 router = Router()
 DB = None
@@ -104,7 +105,36 @@ async def sheet_start(callback: CallbackQuery, state: FSMContext):
 
 @router.message(LinkSheet.url)
 async def sheet_save(message: Message, state: FSMContext):
-    data = await state.get_data(); await DB.update_client_links(data["client_id"], sheet_url=(message.text or "").strip()); await state.clear(); await message.answer("Таблица подключена ✅", reply_markup=admin_menu())
+    data = await state.get_data()
+    url = (message.text or "").strip()
+    try:
+        check = await SHEETS.validate(url)
+    except Exception as exc:
+        await message.answer(f"Не удалось подключить таблицу:\n{exc}\n\nИсправьте доступ или ссылку и пришлите её ещё раз.")
+        return
+    await DB.update_client_links(data["client_id"], sheet_url=url)
+    await DB.log_event(data["client_id"], "sheet_connected", {"rows": check["rows"]})
+    await topic_log(message.bot, DB, SETTINGS.work_group_id, data["client_id"], "📊 Google-таблица подключена и проверена.")
+    await state.clear()
+    client = await DB.get_client(data["client_id"])
+    await message.answer(
+        f"Таблица подключена ✅\nСтрок на первом листе: {check['rows']}",
+        reply_markup=client_card_kb(client["id"]),
+    )
+
+@router.callback_query(F.data.startswith("client_send_posts:"))
+async def send_posts_now(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    client = await DB.get_client(int(callback.data.split(":")[1]))
+    try:
+        ok, text = await send_today_posts(callback.bot, DB, SHEETS, SETTINGS, client, force=False)
+    except Exception as exc:
+        await callback.message.answer(f"Не удалось отправить ветки:\n{exc}")
+        await callback.answer()
+        return
+    await callback.message.answer(("✅ " if ok else "ℹ️ ") + text)
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("client_plan:"))
 async def plan_start(callback: CallbackQuery, state: FSMContext):
