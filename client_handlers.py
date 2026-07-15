@@ -27,12 +27,34 @@ async def start(message: Message, state: FSMContext):
         await message.answer("Админ-центр Threads Client Center 2.0", reply_markup=admin_menu()); return
     current = await db.get_client_by_tg(message.from_user.id)
     if current:
-        await message.answer("Добро пожаловать в личный кабинет.", reply_markup=client_menu()); return
+        await message.answer("""👋 <b>Добро пожаловать в личный кабинет!</b>
+
+Здесь собраны все материалы для вашей работы и продвижения в Threads.
+
+<b>Что доступно:</b>
+
+📅 <b>Ветки</b> — готовые публикации на сегодня.
+📄 <b>Контент-план</b> — стратегия и календарь контента.
+📊 <b>Мои результаты</b> — фиксация статистики и прогресса.
+💬 <b>Связь с менеджером</b> — помощь и ответы на вопросы.
+
+🚀 Желаем продуктивной работы и отличных результатов!""", reply_markup=client_menu()); return
     parts=(message.text or "").split(maxsplit=1)
     if len(parts)==2 and parts[1].startswith("invite_"):
         c=await db.bind_client(parts[1][7:],message.from_user.id)
         if c:
-            await db.log_event(c["id"],"client_bound"); await topic_log(message.bot,db,settings.work_group_id,c["id"],"✅ Клиент подключил личный кабинет."); await message.answer("Личный кабинет подключён ✅",reply_markup=client_menu()); return
+            await db.log_event(c["id"],"client_bound"); await topic_log(message.bot,db,settings.work_group_id,c["id"],"✅ Клиент подключил личный кабинет."); await message.answer("""👋 <b>Добро пожаловать в личный кабинет!</b>
+
+Здесь собраны все материалы для вашей работы и продвижения в Threads.
+
+<b>Что доступно:</b>
+
+📅 <b>Ветки</b> — готовые публикации на сегодня.
+📄 <b>Контент-план</b> — стратегия и календарь контента.
+📊 <b>Мои результаты</b> — фиксация статистики и прогресса.
+💬 <b>Связь с менеджером</b> — помощь и ответы на вопросы.
+
+🚀 Желаем продуктивной работы и отличных результатов!""",reply_markup=client_menu()); return
     await message.answer("Ссылка подключения недействительна или кабинет ещё не создан.")
 
 @router.message(F.text == "📅 Ветки")
