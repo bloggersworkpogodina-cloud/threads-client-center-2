@@ -1,20 +1,23 @@
-# THREADS CLIENT CENTER 2.0 — пакет документации
+# THREADS CLIENT CENTER 2.0
 
-Документы фиксируют утверждённый функционал следующей версии бота.
+## Railway
+1. Mount Volume at `/data`.
+2. Set `DB_PATH=/data/bot.db`.
+3. Add BOT_TOKEN, ADMIN_ID, WORK_GROUP_ID, GOOGLE_SERVICE_ACCOUNT_JSON, TIMEZONE.
+4. Add bot to forum supergroup as admin with topic permissions.
+5. Deploy. Migrations run before polling.
 
-Порядок реализации:
-1. Схема базы и миграции.
-2. Разделение ролей.
-3. Создание клиента и персональной темы.
-4. Клиентский кабинет.
-5. Google Sheets.
-6. Автоматическая отправка веток.
-7. Подтверждение публикации.
-8. Опрос по результатам.
-9. Пятничная статистика.
-10. Аналитика.
-11. Полный тест и Redeploy.
+## Google Sheets
+First sheet headers: `Дата`, `Время`, `Ветка`, `Статус`. Only `Готово` rows for today are sent.
 
-Главное правило:
-бот — единое поле работы;
-рабочая тема — канал общения и зеркало ключевых действий клиента.
+## Local test
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+PYTHONPATH=. python tests/smoke_test.py
+python -m compileall .
+```
+
+## Important
+This build includes the agreed architecture and core flows. Telegram forum permissions, real Google credentials, Railway Volume persistence and scheduled delivery must still be verified in the live environment.

@@ -1,107 +1,66 @@
 from __future__ import annotations
 
 import json
-import os
-from dataclasses import dataclass
 from datetime import date, datetime
-from zoneinfo import ZoneInfo
+from typing import Any
 
 import gspread
+from google.oauth2.service_account import Credentials
+
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly", "https://www.googleapis.com/auth/drive.readonly"]
 
 
-class GoogleSheetsError(RuntimeError):
-    pass
+def _norm_header(value: Any) -> str:
+    return str(value or "").strip().lower().replace("ё", "е")
 
 
-@dataclass(frozen=True, slots=True)
-class ThreadPost:
-    time: str
-    text: str
-
-
-def _normalize_header(value: str) -> str:
-    return " ".join(value.strip().lower().replace("ё", "е").split())
-
-
-def _parse_date(value: str) -> date | None:
-    raw = value.strip()
+def _norm_date(value: Any) -> str | None:
+    text = str(value or "").strip()
     for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y"):
         try:
-            return datetime.strptime(raw, fmt).date()
+            return datetime.strptime(text, fmt).date().isoformat()
         except ValueError:
-            continue
+            pass
     return None
 
 
-def _client() -> gspread.Client:
-    raw_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    if not raw_json:
-        raise GoogleSheetsError("Не задан GOOGLE_SERVICE_ACCOUNT_JSON")
-    try:
-        credentials = json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        raise GoogleSheetsError("GOOGLE_SERVICE_ACCOUNT_JSON содержит неверный JSON") from exc
-    try:
-        return gspread.service_account_from_dict(credentials)
-    except Exception as exc:
-        raise GoogleSheetsError("Не удалось авторизоваться в Google Sheets") from exc
+class GoogleSheetsService:
+    def __init__(self, service_account_json: str | None):
+        self.service_account_json = service_account_json
 
+    def _client(self):
+        if not self.service_account_json:
+            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not configured")
+        info = json.loads(self.service_account_json)
+        credentials = Credentials.from_service_account_info(info, scopes=SCOPES)
+        return gspread.authorize(credentials)
 
-def read_posts_for_date(
-    sheet_url: str,
-    target_date: date,
-) -> list[ThreadPost]:
-    try:
-        worksheet = _client().open_by_url(sheet_url).get_worksheet(0)
-        if worksheet is None:
-            raise GoogleSheetsError("В таблице нет первого листа")
-        values = worksheet.get_all_values()
-    except GoogleSheetsError:
-        raise
-    except Exception as exc:
-        raise GoogleSheetsError(
-            "Не удалось открыть таблицу. Проверьте ссылку и доступ сервисного аккаунта."
-        ) from exc
-
-    if not values:
-        return []
-
-    headers = [_normalize_header(cell) for cell in values[0]]
-    aliases = {
-        "date": {"дата", "date"},
-        "time": {"время", "time"},
-        "text": {"ветка", "текст", "пост", "thread"},
-        "status": {"статус", "status"},
-    }
-    indexes: dict[str, int] = {}
-    for key, names in aliases.items():
-        for idx, header in enumerate(headers):
-            if header in names:
-                indexes[key] = idx
-                break
-    missing = [key for key in ("date", "text", "status") if key not in indexes]
-    if missing:
-        raise GoogleSheetsError(
-            "В первой строке таблицы нужны колонки: Дата, Время, Ветка, Статус."
-        )
-
-    def cell(row: list[str], key: str) -> str:
-        idx = indexes.get(key)
-        return row[idx].strip() if idx is not None and idx < len(row) else ""
-
-    posts: list[ThreadPost] = []
-    for row in values[1:]:
-        if _parse_date(cell(row, "date")) != target_date:
-            continue
-        if cell(row, "status").strip().lower() != "готово":
-            continue
-        text = cell(row, "text")
-        if text:
-            posts.append(ThreadPost(time=cell(row, "time"), text=text))
-    posts.sort(key=lambda item: item.time)
-    return posts
-
-
-def read_today_posts(sheet_url: str, timezone_name: str | None = None) -> list[ThreadPost]:
-    tz = ZoneInfo(timezone_name or os.getenv("TIMEZONE", "Europe/Moscow"))
-    return read_posts_for_date(sheet_url, datetime.now(tz).date())
+    def read_posts(self, sheet_url: str, target_date: date) -> list[dict[str, str]]:
+        sheet = self._client().open_by_url(sheet_url).sheet1
+        values = sheet.get_all_values()
+        if not values:
+            return []
+        headers = [_norm_header(v) for v in values[0]]
+        aliases = {"date": ["дата", "date"], "time": ["время", "time"], "text": ["ветка", "текст", "post"], "status": ["статус", "status"]}
+        indices = {}
+        for key, names in aliases.items():
+            for name in names:
+                if name in headers:
+                    indices[key] = headers.index(name); break
+        missing = [k for k in ("date", "text", "status") if k not in indices]
+        if missing:
+            raise RuntimeError("В таблице отсутствуют обязательные колонки: " + ", ".join(missing))
+        result = []
+        for row in values[1:]:
+            def cell(key: str) -> str:
+                idx = indices.get(key)
+                return row[idx].strip() if idx is not None and idx < len(row) else ""
+            if _norm_date(cell("date")) != target_date.isoformat():
+                continue
+            if cell("status").strip().lower() != "готово":
+                continue
+            text = cell("text")
+            if text:
+                result.append({"time": cell("time"), "text": text})
+        result.sort(key=lambda x: x.get("time") or "")
+        return result

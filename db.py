@@ -1,208 +1,192 @@
 from __future__ import annotations
 
-import asyncio
+import json
+import os
 import secrets
-import sqlite3
-from dataclasses import dataclass
+from datetime import date, datetime
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-
-class ClientAlreadyExistsError(ValueError):
-    def __init__(self, client_id: int):
-        super().__init__("Активный клиент с таким Threads username уже существует")
-        self.client_id = client_id
+import aiosqlite
 
 
-class ClientNotFoundError(LookupError):
-    pass
-
-
-def normalize_threads_username(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip().lstrip("@").strip().lower()
-    return normalized or None
-
-
-@dataclass(slots=True)
 class Database:
-    path: str
-    migrations_dir: str | None = None
+    def __init__(self, path: str, migrations_dir: str | None = None):
+        self.path = path
+        self.migrations_dir = migrations_dir or str(Path(__file__).parent)
 
-    def _connect(self) -> sqlite3.Connection:
-        db_path = Path(self.path)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(db_path, timeout=30)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA busy_timeout = 30000")
-        return conn
+    @asynccontextmanager
+    async def connect(self):
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        conn = await aiosqlite.connect(self.path)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            yield conn
+        finally:
+            await conn.close()
 
-    async def initialize(self) -> None:
-        await asyncio.to_thread(self._initialize_sync)
-
-    def _initialize_sync(self) -> None:
-        migrations_dir = Path(self.migrations_dir or Path(__file__).with_name("migrations"))
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version TEXT PRIMARY KEY,
-                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            applied = {
-                row["version"]
-                for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
-            }
-            for migration in sorted(migrations_dir.glob("*.sql")):
-                if migration.name in applied:
+    async def migrate(self) -> None:
+        async with self.connect() as conn:
+            await conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+            await conn.commit()
+            applied = {row[0] for row in await (await conn.execute("SELECT version FROM schema_migrations")).fetchall()}
+            for file in sorted(Path(self.migrations_dir).glob("[0-9][0-9][0-9]_*.sql")):
+                if file.name in applied:
                     continue
-                conn.executescript(migration.read_text(encoding="utf-8"))
-                conn.execute(
-                    "INSERT INTO schema_migrations(version) VALUES (?)",
-                    (migration.name,),
+                await conn.executescript(file.read_text(encoding="utf-8"))
+                await conn.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                    (file.name, datetime.utcnow().isoformat()),
                 )
-            conn.commit()
+                await conn.commit()
 
-    async def add_client(
-        self,
-        name: str,
-        threads_username: str | None,
-        telegram_link: str | None,
-    ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self._add_client_sync, name, threads_username, telegram_link
-        )
+    @staticmethod
+    def normalize_threads(value: str) -> str:
+        return value.strip().lstrip("@").lower()
 
-    def _add_client_sync(
-        self, name: str, threads_username: str | None, telegram_link: str | None
-    ) -> dict[str, Any]:
-        normalized = normalize_threads_username(threads_username)
-        clean_name = name.strip()
-        if not clean_name:
-            raise ValueError("Имя клиента не может быть пустым")
-        with self._connect() as conn:
-            if normalized:
-                existing = conn.execute(
+    @staticmethod
+    def normalize_telegram(value: str | None) -> str | None:
+        if not value:
+            return None
+        value = value.strip()
+        if value == "-":
+            return None
+        for prefix in ("https://t.me/", "http://t.me/", "t.me/"):
+            if value.lower().startswith(prefix):
+                value = value[len(prefix):]
+                break
+        value = value.strip().lstrip("@").split("?")[0].strip("/")
+        return value or None
+
+    async def create_client(self, name: str, threads_username: str, telegram_username: str | None) -> aiosqlite.Row:
+        threads = self.normalize_threads(threads_username)
+        telegram = self.normalize_telegram(telegram_username)
+        invite_code = secrets.token_urlsafe(10)
+        now = datetime.utcnow().isoformat()
+        async with self.connect() as conn:
+            try:
+                cur = await conn.execute(
                     """
-                    SELECT id FROM clients
-                    WHERE threads_username_normalized = ? AND is_active = 1
+                    INSERT INTO clients(name, threads_username_normalized, telegram_username, invite_code, is_active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 1, ?, ?)
                     """,
-                    (normalized,),
-                ).fetchone()
-                if existing:
-                    raise ClientAlreadyExistsError(existing["id"])
-            invite_code = secrets.token_urlsafe(18)
-            cursor = conn.execute(
-                """
-                INSERT INTO clients(
-                    name, invite_code, threads_username_normalized, telegram_link
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (clean_name, invite_code, normalized, telegram_link),
-            )
-            conn.commit()
-            return self._get_client_sync(cursor.lastrowid)
+                    (name.strip(), threads, telegram, invite_code, now, now),
+                )
+                await conn.commit()
+            except aiosqlite.IntegrityError as exc:
+                raise ValueError("Активный клиент с таким Threads username уже существует") from exc
+            row = await (await conn.execute("SELECT * FROM clients WHERE id = ?", (cur.lastrowid,))).fetchone()
+            return row
 
-    async def get_client(self, client_id: int) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_client_sync, client_id)
+    async def list_clients(self, active_only: bool = True):
+        q = "SELECT * FROM clients"
+        params: tuple[Any, ...] = ()
+        if active_only:
+            q += " WHERE is_active = 1"
+        q += " ORDER BY name COLLATE NOCASE"
+        async with self.connect() as conn:
+            return await (await conn.execute(q, params)).fetchall()
 
-    def _get_client_sync(self, client_id: int) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute("SELECT * FROM clients WHERE id = ?", (client_id,)).fetchone()
-            return dict(row) if row else None
+    async def get_client(self, client_id: int):
+        async with self.connect() as conn:
+            return await (await conn.execute("SELECT * FROM clients WHERE id = ?", (client_id,))).fetchone()
 
-    async def get_client_by_telegram(self, telegram_id: int) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_client_by_telegram_sync, telegram_id)
+    async def get_client_by_tg(self, telegram_id: int):
+        async with self.connect() as conn:
+            return await (await conn.execute("SELECT * FROM clients WHERE telegram_id = ? AND is_active = 1", (telegram_id,))).fetchone()
 
-    def _get_client_by_telegram_sync(self, telegram_id: int) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM clients WHERE telegram_id = ? AND is_active = 1",
-                (telegram_id,),
-            ).fetchone()
-            return dict(row) if row else None
+    async def get_client_by_topic(self, topic_id: int):
+        async with self.connect() as conn:
+            return await (await conn.execute("SELECT * FROM clients WHERE topic_id = ? AND is_active = 1", (topic_id,))).fetchone()
 
-    async def get_client_by_topic(self, topic_id: int) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_client_by_topic_sync, topic_id)
-
-    def _get_client_by_topic_sync(self, topic_id: int) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM clients WHERE topic_id = ? AND is_active = 1",
-                (topic_id,),
-            ).fetchone()
-            return dict(row) if row else None
-
-    async def list_active_clients(self) -> list[dict[str, Any]]:
-        return await asyncio.to_thread(self._list_active_clients_sync)
-
-    def _list_active_clients_sync(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM clients WHERE is_active = 1 ORDER BY name COLLATE NOCASE"
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    async def bind_invite(self, invite_code: str, telegram_id: int) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._bind_invite_sync, invite_code, telegram_id)
-
-    def _bind_invite_sync(self, invite_code: str, telegram_id: int) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            target = conn.execute(
-                "SELECT id FROM clients WHERE invite_code = ? AND is_active = 1",
-                (invite_code,),
-            ).fetchone()
-            if not target:
+    async def bind_client(self, invite_code: str, telegram_id: int):
+        async with self.connect() as conn:
+            row = await (await conn.execute("SELECT * FROM clients WHERE invite_code = ? AND is_active = 1", (invite_code,))).fetchone()
+            if not row:
                 return None
-            # Один Telegram-аккаунт может быть привязан только к одной актуальной записи.
-            conn.execute(
-                "UPDATE clients SET telegram_id = NULL, updated_at = CURRENT_TIMESTAMP "
-                "WHERE telegram_id = ? AND id != ?",
-                (telegram_id, target["id"]),
+            await conn.execute("UPDATE clients SET telegram_id = NULL WHERE telegram_id = ? AND id <> ?", (telegram_id, row["id"]))
+            await conn.execute("UPDATE clients SET telegram_id = ?, updated_at = ? WHERE id = ?", (telegram_id, datetime.utcnow().isoformat(), row["id"]))
+            await conn.commit()
+            return await (await conn.execute("SELECT * FROM clients WHERE id = ?", (row["id"],))).fetchone()
+
+    async def update_client_links(self, client_id: int, *, sheet_url: str | None = None, content_plan_url: str | None = None):
+        fields, values = [], []
+        if sheet_url is not None:
+            fields.append("sheet_url = ?"); values.append(sheet_url)
+        if content_plan_url is not None:
+            fields.append("content_plan_url = ?"); values.append(content_plan_url)
+        fields.append("updated_at = ?"); values.append(datetime.utcnow().isoformat())
+        values.append(client_id)
+        async with self.connect() as conn:
+            await conn.execute(f"UPDATE clients SET {', '.join(fields)} WHERE id = ?", tuple(values))
+            await conn.commit()
+
+    async def set_topic(self, client_id: int, topic_id: int):
+        async with self.connect() as conn:
+            await conn.execute("UPDATE clients SET topic_id = ?, updated_at = ? WHERE id = ?", (topic_id, datetime.utcnow().isoformat(), client_id))
+            await conn.commit()
+
+    async def archive_client(self, client_id: int):
+        async with self.connect() as conn:
+            await conn.execute("UPDATE clients SET is_active = 0, updated_at = ? WHERE id = ?", (datetime.utcnow().isoformat(), client_id))
+            await conn.commit()
+
+    async def save_posts(self, client_id: int, post_date: str, posts: list[dict[str, str]]) -> list[aiosqlite.Row]:
+        async with self.connect() as conn:
+            for idx, post in enumerate(posts):
+                await conn.execute(
+                    """INSERT OR IGNORE INTO daily_posts(client_id, post_date, slot, body, source_row, sent_at)
+                    VALUES (?, ?, ?, ?, ?, ?)""",
+                    (client_id, post_date, post.get("time"), post["text"], idx, datetime.utcnow().isoformat()),
+                )
+            await conn.commit()
+            return await (await conn.execute("SELECT * FROM daily_posts WHERE client_id=? AND post_date=? ORDER BY slot", (client_id, post_date))).fetchall()
+
+    async def posts_sent(self, client_id: int, post_date: str) -> bool:
+        async with self.connect() as conn:
+            row = await (await conn.execute("SELECT 1 FROM daily_posts WHERE client_id=? AND post_date=? LIMIT 1", (client_id, post_date))).fetchone()
+            return bool(row)
+
+    async def save_publication_confirmation(self, client_id: int, day: str, total: int, published: int, status: str, comment: str | None = None):
+        async with self.connect() as conn:
+            await conn.execute(
+                """INSERT INTO publication_confirmations(client_id, confirmation_date, total_posts, published_posts, status, comment, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_id, confirmation_date) DO UPDATE SET total_posts=excluded.total_posts, published_posts=excluded.published_posts, status=excluded.status, comment=excluded.comment, created_at=excluded.created_at""",
+                (client_id, day, total, published, status, comment, datetime.utcnow().isoformat()),
             )
-            conn.execute(
-                "UPDATE clients SET telegram_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (telegram_id, target["id"]),
+            await conn.commit()
+
+    async def save_client_result(self, client_id: int, start: str, end: str, responses: int, leads: int, comment: str | None):
+        async with self.connect() as conn:
+            await conn.execute(
+                """INSERT INTO client_results(client_id, period_start, period_end, responses_count, leads_count, comment, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (client_id, start, end, responses, leads, comment, datetime.utcnow().isoformat()),
             )
-            conn.commit()
-            return self._get_client_sync(target["id"])
+            await conn.commit()
 
-    async def set_sheet_url(self, client_id: int, url: str | None) -> None:
-        await asyncio.to_thread(self._update_field_sync, client_id, "sheet_url", url)
-
-    async def set_content_plan_url(self, client_id: int, url: str | None) -> None:
-        await asyncio.to_thread(self._update_field_sync, client_id, "content_plan_url", url)
-
-    async def set_topic_id(self, client_id: int, topic_id: int | None) -> None:
-        await asyncio.to_thread(self._update_field_sync, client_id, "topic_id", topic_id)
-
-    def _update_field_sync(self, client_id: int, field: str, value: Any) -> None:
-        allowed = {"sheet_url", "content_plan_url", "topic_id"}
-        if field not in allowed:
-            raise ValueError("Недопустимое поле")
-        with self._connect() as conn:
-            cursor = conn.execute(
-                f"UPDATE clients SET {field} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (value, client_id),
+    async def save_weekly_stats(self, client_id: int, week_start: str, week_end: str, data: dict[str, Any]):
+        async with self.connect() as conn:
+            await conn.execute(
+                """INSERT INTO weekly_stats(client_id, week_start, week_end, views, likes, replies, reposts, quotes, new_followers, telegram_clicks, best_post, manager_comment, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_id, week_start) DO UPDATE SET week_end=excluded.week_end, views=excluded.views, likes=excluded.likes, replies=excluded.replies, reposts=excluded.reposts, quotes=excluded.quotes, new_followers=excluded.new_followers, telegram_clicks=excluded.telegram_clicks, best_post=excluded.best_post, manager_comment=excluded.manager_comment, updated_at=excluded.updated_at""",
+                (client_id, week_start, week_end, data["views"], data["likes"], data["replies"], data["reposts"], data["quotes"], data["new_followers"], data["telegram_clicks"], data.get("best_post"), data.get("manager_comment"), datetime.utcnow().isoformat(), datetime.utcnow().isoformat()),
             )
-            if cursor.rowcount == 0:
-                raise ClientNotFoundError(client_id)
-            conn.commit()
+            await conn.commit()
 
-    async def archive_client(self, client_id: int) -> None:
-        await asyncio.to_thread(self._archive_client_sync, client_id)
+    async def analytics(self, client_id: int) -> dict[str, Any]:
+        async with self.connect() as conn:
+            sent = (await (await conn.execute("SELECT COUNT(*) FROM daily_posts WHERE client_id=?", (client_id,))).fetchone())[0]
+            published = (await (await conn.execute("SELECT COALESCE(SUM(published_posts),0) FROM publication_confirmations WHERE client_id=?", (client_id,))).fetchone())[0]
+            responses, leads = await (await conn.execute("SELECT COALESCE(SUM(responses_count),0), COALESCE(SUM(leads_count),0) FROM client_results WHERE client_id=?", (client_id,))).fetchone()
+            latest = await (await conn.execute("SELECT * FROM weekly_stats WHERE client_id=? ORDER BY week_start DESC LIMIT 1", (client_id,))).fetchone()
+            return {"sent": sent, "published": published, "discipline": round((published / sent * 100), 1) if sent else 0, "responses": responses, "leads": leads, "latest": latest}
 
-    def _archive_client_sync(self, client_id: int) -> None:
-        with self._connect() as conn:
-            cursor = conn.execute(
-                "UPDATE clients SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (client_id,),
-            )
-            if cursor.rowcount == 0:
-                raise ClientNotFoundError(client_id)
-            conn.commit()
+    async def log_event(self, client_id: int, event_type: str, payload: dict[str, Any] | None = None):
+        async with self.connect() as conn:
+            await conn.execute("INSERT INTO client_events(client_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)", (client_id, event_type, json.dumps(payload or {}, ensure_ascii=False), datetime.utcnow().isoformat()))
+            await conn.commit()
