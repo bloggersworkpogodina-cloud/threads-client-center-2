@@ -28,19 +28,117 @@ class Database:
             await conn.close()
 
     async def migrate(self) -> None:
+        """Create the full schema before Telegram polling starts.
+
+        The schema is embedded intentionally so Railway does not depend on an
+        external SQL file being present in the deploy root.
+        """
+        schema = r"""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS clients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            telegram_id INTEGER,
+            invite_code TEXT NOT NULL UNIQUE,
+            threads_username_normalized TEXT NOT NULL,
+            telegram_username TEXT,
+            topic_id INTEGER,
+            sheet_url TEXT,
+            content_plan_url TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_clients_active_threads
+            ON clients(threads_username_normalized) WHERE is_active = 1;
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_clients_telegram_id
+            ON clients(telegram_id) WHERE telegram_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_clients_topic_id
+            ON clients(topic_id) WHERE topic_id IS NOT NULL;
+
+        CREATE TABLE IF NOT EXISTS daily_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL REFERENCES clients(id),
+            post_date TEXT NOT NULL,
+            slot TEXT,
+            body TEXT NOT NULL,
+            source_row INTEGER,
+            sent_at TEXT NOT NULL,
+            UNIQUE(client_id, post_date, source_row)
+        );
+
+        CREATE TABLE IF NOT EXISTS publication_confirmations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL REFERENCES clients(id),
+            confirmation_date TEXT NOT NULL,
+            total_posts INTEGER NOT NULL,
+            published_posts INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            comment TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(client_id, confirmation_date)
+        );
+
+        CREATE TABLE IF NOT EXISTS client_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL REFERENCES clients(id),
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            responses_count INTEGER NOT NULL,
+            leads_count INTEGER NOT NULL,
+            comment TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS weekly_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL REFERENCES clients(id),
+            week_start TEXT NOT NULL,
+            week_end TEXT NOT NULL,
+            views INTEGER NOT NULL DEFAULT 0,
+            likes INTEGER NOT NULL DEFAULT 0,
+            replies INTEGER NOT NULL DEFAULT 0,
+            reposts INTEGER NOT NULL DEFAULT 0,
+            quotes INTEGER NOT NULL DEFAULT 0,
+            new_followers INTEGER NOT NULL DEFAULT 0,
+            telegram_clicks INTEGER NOT NULL DEFAULT 0,
+            best_post TEXT,
+            manager_comment TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(client_id, week_start)
+        );
+
+        CREATE TABLE IF NOT EXISTS client_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL REFERENCES clients(id),
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        """
         async with self.connect() as conn:
-            await conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+            await conn.executescript(schema)
+            await conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                ("embedded_schema_v1", datetime.utcnow().isoformat()),
+            )
             await conn.commit()
-            applied = {row[0] for row in await (await conn.execute("SELECT version FROM schema_migrations")).fetchall()}
-            for file in sorted(Path(self.migrations_dir).glob("[0-9][0-9][0-9]_*.sql")):
-                if file.name in applied:
-                    continue
-                await conn.executescript(file.read_text(encoding="utf-8"))
-                await conn.execute(
-                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                    (file.name, datetime.utcnow().isoformat()),
-                )
-                await conn.commit()
+            required = {
+                "clients", "daily_posts", "publication_confirmations",
+                "client_results", "weekly_stats", "client_events",
+            }
+            rows = await (await conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )).fetchall()
+            present = {row[0] for row in rows}
+            missing = required - present
+            if missing:
+                raise RuntimeError(f"Database schema initialization failed: {sorted(missing)}")
 
     @staticmethod
     def normalize_threads(value: str) -> str:

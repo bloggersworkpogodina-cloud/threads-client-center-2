@@ -5,7 +5,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from keyboards import publication_kb
-from services.topics import topic_log
+from topics import topic_log
 
 
 async def send_today_posts(bot: Bot, db, sheets, settings, client, *, force: bool = False) -> tuple[bool, str]:
