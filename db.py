@@ -218,7 +218,10 @@ class Database:
         fields.append("updated_at = ?"); values.append(datetime.utcnow().isoformat())
         values.append(client_id)
         async with self.connect() as conn:
-            await conn.execute(f"UPDATE clients SET {', '.join(fields)} WHERE id = ?", tuple(values))
+            cur = await conn.execute(f"UPDATE clients SET {', '.join(fields)} WHERE id = ?", tuple(values))
+            if cur.rowcount == 0:
+                await conn.rollback()
+                raise LookupError("Клиент больше не существует в текущей базе")
             await conn.commit()
 
     async def set_topic(self, client_id: int, topic_id: int):
@@ -284,7 +287,20 @@ class Database:
             latest = await (await conn.execute("SELECT * FROM weekly_stats WHERE client_id=? ORDER BY week_start DESC LIMIT 1", (client_id,))).fetchone()
             return {"sent": sent, "published": published, "discipline": round((published / sent * 100), 1) if sent else 0, "responses": responses, "leads": leads, "latest": latest}
 
-    async def log_event(self, client_id: int, event_type: str, payload: dict[str, Any] | None = None):
+    async def log_event(self, client_id: int, event_type: str, payload: dict[str, Any] | None = None) -> bool:
+        """Write an event only for an existing client.
+
+        Telegram can keep old inline cards after a Railway redeploy. If the database
+        was recreated, callbacks from such cards must not crash the bot with a
+        FOREIGN KEY error.
+        """
         async with self.connect() as conn:
-            await conn.execute("INSERT INTO client_events(client_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)", (client_id, event_type, json.dumps(payload or {}, ensure_ascii=False), datetime.utcnow().isoformat()))
+            exists = await (await conn.execute("SELECT 1 FROM clients WHERE id = ?", (client_id,))).fetchone()
+            if not exists:
+                return False
+            await conn.execute(
+                "INSERT INTO client_events(client_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (client_id, event_type, json.dumps(payload or {}, ensure_ascii=False), datetime.utcnow().isoformat()),
+            )
             await conn.commit()
+            return True

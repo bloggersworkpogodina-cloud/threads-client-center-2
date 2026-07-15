@@ -89,7 +89,12 @@ async def clients(message: Message):
 
 @router.callback_query(F.data.startswith("client_view:"))
 async def view_client(callback: CallbackQuery):
-    c = await DB.get_client(int(callback.data.split(":")[1])); await callback.message.answer(card_text(c), reply_markup=client_card_kb(c["id"])); await callback.answer()
+    c = await DB.get_client(int(callback.data.split(":")[1]))
+    if not c:
+        await callback.answer("Карточка устарела. Обновите список клиентов.", show_alert=True)
+        return
+    await callback.message.answer(card_text(c), reply_markup=client_card_kb(c["id"]))
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("client_invite:"))
 async def invite(callback: CallbackQuery, bot: Bot):
@@ -106,17 +111,38 @@ async def sheet_start(callback: CallbackQuery, state: FSMContext):
 @router.message(LinkSheet.url)
 async def sheet_save(message: Message, state: FSMContext):
     data = await state.get_data()
+    client_id = data.get("client_id")
+    client = await DB.get_client(client_id) if client_id else None
+    if not client:
+        await state.clear()
+        await message.answer(
+            "Эта карточка клиента устарела после обновления базы.\n"
+            "Откройте «👥 Клиенты» и выберите клиента заново.",
+            reply_markup=admin_menu(),
+        )
+        return
+
     url = (message.text or "").strip()
     try:
         check = await SHEETS.validate(url)
     except Exception as exc:
         await message.answer(f"Не удалось подключить таблицу:\n{exc}\n\nИсправьте доступ или ссылку и пришлите её ещё раз.")
         return
-    await DB.update_client_links(data["client_id"], sheet_url=url)
-    await DB.log_event(data["client_id"], "sheet_connected", {"rows": check["rows"]})
-    await topic_log(message.bot, DB, SETTINGS.work_group_id, data["client_id"], "📊 Google-таблица подключена и проверена.")
+
+    try:
+        await DB.update_client_links(client_id, sheet_url=url)
+    except LookupError:
+        await state.clear()
+        await message.answer(
+            "Клиент больше не найден в текущей базе. Создайте его заново или откройте актуальную карточку.",
+            reply_markup=admin_menu(),
+        )
+        return
+
+    await DB.log_event(client_id, "sheet_connected", {"rows": check["rows"]})
+    await topic_log(message.bot, DB, SETTINGS.work_group_id, client_id, "📊 Google-таблица подключена и проверена.")
     await state.clear()
-    client = await DB.get_client(data["client_id"])
+    client = await DB.get_client(client_id)
     await message.answer(
         f"Таблица подключена ✅\nСтрок на первом листе: {check['rows']}",
         reply_markup=client_card_kb(client["id"]),
