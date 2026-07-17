@@ -204,21 +204,21 @@ async def _analytics_num(message: Message, state: FSMContext, key: str, next_sta
     await state.update_data(**{key:value}); await state.set_state(next_state); await message.answer(prompt)
 
 @router.message(BaselineFlow.threads_followers)
-async def baseline_1(m: Message,s: FSMContext): await _analytics_num(m,s,"threads_followers",BaselineFlow.telegram_followers,"Количество подписчиков Telegram (если канала нет — 0):")
+async def baseline_1(message: Message, state: FSMContext): await _analytics_num(message, state,"threads_followers",BaselineFlow.telegram_followers,"Количество подписчиков Telegram (если канала нет — 0):")
 @router.message(BaselineFlow.telegram_followers)
-async def baseline_2(m: Message,s: FSMContext): await _analytics_num(m,s,"telegram_followers",BaselineFlow.weekly_leads,"Среднее количество заявок в неделю:")
+async def baseline_2(message: Message, state: FSMContext): await _analytics_num(message, state,"telegram_followers",BaselineFlow.weekly_leads,"Среднее количество заявок в неделю:")
 @router.message(BaselineFlow.weekly_leads)
-async def baseline_3(m: Message,s: FSMContext): await _analytics_num(m,s,"weekly_leads",BaselineFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
+async def baseline_3(message: Message, state: FSMContext): await _analytics_num(message, state,"weekly_leads",BaselineFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
 @router.message(BaselineFlow.overview_screen, F.photo)
-async def baseline_4(m: Message,s: FSMContext):
-    await s.update_data(overview_file_id=m.photo[-1].file_id); await s.set_state(BaselineFlow.content_screen); await m.answer('Пришлите скрин «Контент»:')
+async def baseline_4(message: Message, state: FSMContext):
+    await state.update_data(overview_file_id=message.photo[-1].file_id); await state.set_state(BaselineFlow.content_screen); await message.answer('Пришлите скрин «Контент»:')
 @router.message(BaselineFlow.overview_screen)
-async def baseline_4_bad(m: Message): await m.answer("Нужно отправить изображение.")
+async def baseline_4_bad(message: Message): await message.answer("Нужно отправить изображение.")
 @router.message(BaselineFlow.content_screen, F.photo)
-async def baseline_5(m: Message,s: FSMContext):
-    await s.update_data(content_file_id=m.photo[-1].file_id); await s.set_state(BaselineFlow.telegram_screen); await m.answer("Пришлите скрин Telegram или нажмите «Пропустить»:",reply_markup=skip_photo_kb("baseline_skip_tg"))
+async def baseline_5(message: Message, state: FSMContext):
+    await state.update_data(content_file_id=message.photo[-1].file_id); await state.set_state(BaselineFlow.telegram_screen); await message.answer("Пришлите скрин Telegram или нажмите «Пропустить»:",reply_markup=skip_photo_kb("baseline_skip_tg"))
 @router.message(BaselineFlow.content_screen)
-async def baseline_5_bad(m: Message): await m.answer("Нужно отправить изображение.")
+async def baseline_5_bad(message: Message): await message.answer("Нужно отправить изображение.")
 
 async def _finish_baseline(message: Message, state: FSMContext, telegram_file_id=None):
     d=await state.get_data(); d["telegram_file_id"]=telegram_file_id
@@ -227,12 +227,12 @@ async def _finish_baseline(message: Message, state: FSMContext, telegram_file_id
     await state.clear(); await message.answer("Стартовые показатели сохранены ✅",reply_markup=admin_menu())
 
 @router.message(BaselineFlow.telegram_screen, F.photo)
-async def baseline_6(m: Message,s: FSMContext): await _finish_baseline(m,s,m.photo[-1].file_id)
+async def baseline_6(message: Message, state: FSMContext): await _finish_baseline(message, state, message.photo[-1].file_id)
 @router.callback_query(F.data=="baseline_skip_tg")
 async def baseline_skip(callback: CallbackQuery,state:FSMContext):
     await _finish_baseline(callback.message,state,None); await callback.answer()
 @router.message(BaselineFlow.telegram_screen)
-async def baseline_6_bad(m: Message): await m.answer("Отправьте изображение или нажмите «Пропустить».",reply_markup=skip_photo_kb("baseline_skip_tg"))
+async def baseline_6_bad(message: Message): await message.answer("Отправьте изображение или нажмите «Пропустить».",reply_markup=skip_photo_kb("baseline_skip_tg"))
 
 @router.callback_query(F.data.startswith("weekly_analytics:"))
 async def weekly_analytics_start(callback: CallbackQuery,state:FSMContext):
@@ -242,21 +242,21 @@ async def weekly_analytics_start(callback: CallbackQuery,state:FSMContext):
     await state.clear(); await state.update_data(client_id=cid); await state.set_state(WeeklyAnalyticsFlow.threads_followers)
     await callback.message.answer("Текущее количество подписчиков Threads:"); await callback.answer()
 @router.message(WeeklyAnalyticsFlow.threads_followers)
-async def wa1(m:Message,s:FSMContext): await _analytics_num(m,s,"threads_followers",WeeklyAnalyticsFlow.telegram_followers,"Текущее количество подписчиков Telegram (если канала нет — 0):")
+async def wa1(message: Message, state: FSMContext): await _analytics_num(message, state,"threads_followers",WeeklyAnalyticsFlow.telegram_followers,"Текущее количество подписчиков Telegram (если канала нет — 0):")
 @router.message(WeeklyAnalyticsFlow.telegram_followers)
-async def wa2(m:Message,s:FSMContext): await _analytics_num(m,s,"telegram_followers",WeeklyAnalyticsFlow.views,"Просмотры за неделю:")
+async def wa2(message: Message, state: FSMContext): await _analytics_num(message, state,"telegram_followers",WeeklyAnalyticsFlow.views,"Просмотры за неделю:")
 @router.message(WeeklyAnalyticsFlow.views)
-async def wa3(m:Message,s:FSMContext): await _analytics_num(m,s,"views",WeeklyAnalyticsFlow.applications,"Заявки за неделю:")
+async def wa3(message: Message, state: FSMContext): await _analytics_num(message, state,"views",WeeklyAnalyticsFlow.applications,"Заявки за неделю:")
 @router.message(WeeklyAnalyticsFlow.applications)
-async def wa4(m:Message,s:FSMContext): await _analytics_num(m,s,"applications",WeeklyAnalyticsFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
+async def wa4(message: Message, state: FSMContext): await _analytics_num(message, state,"applications",WeeklyAnalyticsFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
 @router.message(WeeklyAnalyticsFlow.overview_screen,F.photo)
-async def wa5(m:Message,s:FSMContext): await s.update_data(overview_file_id=m.photo[-1].file_id); await s.set_state(WeeklyAnalyticsFlow.content_screen); await m.answer('Пришлите скрин «Контент»:')
+async def wa5(message: Message, state: FSMContext): await state.update_data(overview_file_id=message.photo[-1].file_id); await state.set_state(WeeklyAnalyticsFlow.content_screen); await message.answer('Пришлите скрин «Контент»:')
 @router.message(WeeklyAnalyticsFlow.overview_screen)
-async def wa5_bad(m:Message): await m.answer("Нужно отправить изображение.")
+async def wa5_bad(message: Message): await message.answer("Нужно отправить изображение.")
 @router.message(WeeklyAnalyticsFlow.content_screen,F.photo)
-async def wa6(m:Message,s:FSMContext): await s.update_data(content_file_id=m.photo[-1].file_id); await s.set_state(WeeklyAnalyticsFlow.telegram_screen); await m.answer("Пришлите скрин Telegram или нажмите «Пропустить»:",reply_markup=skip_photo_kb("weekly_skip_tg"))
+async def wa6(message: Message, state: FSMContext): await state.update_data(content_file_id=message.photo[-1].file_id); await state.set_state(WeeklyAnalyticsFlow.telegram_screen); await message.answer("Пришлите скрин Telegram или нажмите «Пропустить»:",reply_markup=skip_photo_kb("weekly_skip_tg"))
 @router.message(WeeklyAnalyticsFlow.content_screen)
-async def wa6_bad(m:Message): await m.answer("Нужно отправить изображение.")
+async def wa6_bad(message: Message): await message.answer("Нужно отправить изображение.")
 
 async def _finish_weekly(message:Message,state:FSMContext,telegram_file_id=None):
     d=await state.get_data(); d["telegram_file_id"]=telegram_file_id
@@ -265,11 +265,11 @@ async def _finish_weekly(message:Message,state:FSMContext,telegram_file_id=None)
     await topic_log(message.bot,DB,SETTINGS.work_group_id,d["client_id"],"📈 Администратор внёс недельную статистику.")
     await state.clear(); await message.answer("Недельная статистика сохранена ✅",reply_markup=admin_menu())
 @router.message(WeeklyAnalyticsFlow.telegram_screen,F.photo)
-async def wa7(m:Message,s:FSMContext): await _finish_weekly(m,s,m.photo[-1].file_id)
+async def wa7(message: Message, state: FSMContext): await _finish_weekly(message, state, message.photo[-1].file_id)
 @router.callback_query(F.data=="weekly_skip_tg")
 async def weekly_skip(callback:CallbackQuery,state:FSMContext): await _finish_weekly(callback.message,state,None); await callback.answer()
 @router.message(WeeklyAnalyticsFlow.telegram_screen)
-async def wa7_bad(m:Message): await m.answer("Отправьте изображение или нажмите «Пропустить».",reply_markup=skip_photo_kb("weekly_skip_tg"))
+async def wa7_bad(message: Message): await message.answer("Отправьте изображение или нажмите «Пропустить».",reply_markup=skip_photo_kb("weekly_skip_tg"))
 
 @router.callback_query(F.data.startswith("weekly_stats:"))
 async def weekly_start(callback: CallbackQuery, state: FSMContext):
