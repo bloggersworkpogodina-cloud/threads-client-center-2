@@ -113,6 +113,18 @@ class Database:
             UNIQUE(client_id, week_start)
         );
 
+        CREATE TABLE IF NOT EXISTS client_baseline (
+            client_id INTEGER PRIMARY KEY REFERENCES clients(id),
+            threads_followers INTEGER NOT NULL DEFAULT 0,
+            telegram_followers INTEGER NOT NULL DEFAULT 0,
+            weekly_leads INTEGER NOT NULL DEFAULT 0,
+            overview_file_id TEXT NOT NULL,
+            content_file_id TEXT NOT NULL,
+            telegram_file_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS client_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_id INTEGER NOT NULL REFERENCES clients(id),
@@ -123,6 +135,17 @@ class Database:
         """
         async with self.connect() as conn:
             await conn.executescript(schema)
+            weekly_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(weekly_stats)")).fetchall()}
+            for column, definition in {
+                "threads_followers": "INTEGER NOT NULL DEFAULT 0",
+                "telegram_followers": "INTEGER NOT NULL DEFAULT 0",
+                "applications": "INTEGER NOT NULL DEFAULT 0",
+                "overview_file_id": "TEXT",
+                "content_file_id": "TEXT",
+                "telegram_file_id": "TEXT",
+            }.items():
+                if column not in weekly_columns:
+                    await conn.execute(f"ALTER TABLE weekly_stats ADD COLUMN {column} {definition}")
             await conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 ("embedded_schema_v1", datetime.utcnow().isoformat()),
@@ -130,7 +153,7 @@ class Database:
             await conn.commit()
             required = {
                 "clients", "daily_posts", "publication_confirmations",
-                "client_results", "weekly_stats", "client_events",
+                "client_results", "weekly_stats", "client_baseline", "client_events",
             }
             rows = await (await conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -279,13 +302,48 @@ class Database:
             )
             await conn.commit()
 
+    async def save_baseline(self, client_id: int, data: dict[str, Any]):
+        now = datetime.utcnow().isoformat()
+        async with self.connect() as conn:
+            await conn.execute(
+                """INSERT INTO client_baseline(client_id, threads_followers, telegram_followers, weekly_leads, overview_file_id, content_file_id, telegram_file_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_id) DO UPDATE SET threads_followers=excluded.threads_followers, telegram_followers=excluded.telegram_followers, weekly_leads=excluded.weekly_leads, overview_file_id=excluded.overview_file_id, content_file_id=excluded.content_file_id, telegram_file_id=excluded.telegram_file_id, updated_at=excluded.updated_at""",
+                (client_id, data["threads_followers"], data["telegram_followers"], data["weekly_leads"], data["overview_file_id"], data["content_file_id"], data.get("telegram_file_id"), now, now),
+            )
+            await conn.commit()
+
+    async def get_baseline(self, client_id: int):
+        async with self.connect() as conn:
+            return await (await conn.execute("SELECT * FROM client_baseline WHERE client_id=?", (client_id,))).fetchone()
+
+    async def clients_missing_baseline(self):
+        async with self.connect() as conn:
+            return await (await conn.execute("""SELECT c.* FROM clients c LEFT JOIN client_baseline b ON b.client_id=c.id WHERE c.is_active=1 AND b.client_id IS NULL ORDER BY c.name COLLATE NOCASE""")).fetchall()
+
+    async def save_weekly_analytics(self, client_id: int, week_start: str, week_end: str, data: dict[str, Any]):
+        now = datetime.utcnow().isoformat()
+        async with self.connect() as conn:
+            await conn.execute(
+                """INSERT INTO weekly_stats(client_id, week_start, week_end, views, likes, replies, reposts, quotes, new_followers, telegram_clicks, best_post, manager_comment, created_at, updated_at, threads_followers, telegram_followers, applications, overview_file_id, content_file_id, telegram_file_id)
+                VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_id, week_start) DO UPDATE SET week_end=excluded.week_end, views=excluded.views, threads_followers=excluded.threads_followers, telegram_followers=excluded.telegram_followers, applications=excluded.applications, overview_file_id=excluded.overview_file_id, content_file_id=excluded.content_file_id, telegram_file_id=excluded.telegram_file_id, updated_at=excluded.updated_at""",
+                (client_id, week_start, week_end, data["views"], now, now, data["threads_followers"], data["telegram_followers"], data["applications"], data["overview_file_id"], data["content_file_id"], data.get("telegram_file_id")),
+            )
+            await conn.commit()
+
+    async def clients_missing_weekly_stats(self, week_start: str):
+        async with self.connect() as conn:
+            return await (await conn.execute("""SELECT c.* FROM clients c LEFT JOIN weekly_stats w ON w.client_id=c.id AND w.week_start=? WHERE c.is_active=1 AND w.id IS NULL ORDER BY c.name COLLATE NOCASE""", (week_start,))).fetchall()
+
     async def analytics(self, client_id: int) -> dict[str, Any]:
         async with self.connect() as conn:
             sent = (await (await conn.execute("SELECT COUNT(*) FROM daily_posts WHERE client_id=?", (client_id,))).fetchone())[0]
             published = (await (await conn.execute("SELECT COALESCE(SUM(published_posts),0) FROM publication_confirmations WHERE client_id=?", (client_id,))).fetchone())[0]
             responses, leads = await (await conn.execute("SELECT COALESCE(SUM(responses_count),0), COALESCE(SUM(leads_count),0) FROM client_results WHERE client_id=?", (client_id,))).fetchone()
             latest = await (await conn.execute("SELECT * FROM weekly_stats WHERE client_id=? ORDER BY week_start DESC LIMIT 1", (client_id,))).fetchone()
-            return {"sent": sent, "published": published, "discipline": round((published / sent * 100), 1) if sent else 0, "responses": responses, "leads": leads, "latest": latest}
+            baseline = await (await conn.execute("SELECT * FROM client_baseline WHERE client_id=?", (client_id,))).fetchone()
+            return {"sent": sent, "published": published, "discipline": round((published / sent * 100), 1) if sent else 0, "responses": responses, "leads": leads, "latest": latest, "baseline": baseline}
 
     async def log_event(self, client_id: int, event_type: str, payload: dict[str, Any] | None = None) -> bool:
         """Write an event only for an existing client.

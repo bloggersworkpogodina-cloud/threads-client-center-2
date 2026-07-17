@@ -21,3 +21,21 @@ class ResultsFlow(StatesGroup):
 
 class WeeklyStatsFlow(StatesGroup):
     views = State(); likes = State(); replies = State(); reposts = State(); quotes = State(); new_followers = State(); telegram_clicks = State(); best_post = State(); manager_comment = State()
+
+
+class BaselineFlow(StatesGroup):
+    threads_followers = State()
+    telegram_followers = State()
+    weekly_leads = State()
+    overview_screen = State()
+    content_screen = State()
+    telegram_screen = State()
+
+class WeeklyAnalyticsFlow(StatesGroup):
+    threads_followers = State()
+    telegram_followers = State()
+    views = State()
+    applications = State()
+    overview_screen = State()
+    content_screen = State()
+    telegram_screen = State()

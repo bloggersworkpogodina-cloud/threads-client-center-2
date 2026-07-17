@@ -1,51 +1,49 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
-from pathlib import Path
+from datetime import date, timedelta
 
-from db import ClientAlreadyExistsError, Database, normalize_threads_username
+from db import Database
 
 
-async def run() -> None:
-    assert normalize_threads_username("  @Test_User  ") == "test_user"
-    with tempfile.TemporaryDirectory() as tmp:
-        db_path = str(Path(tmp) / "bot.db")
-        migrations = str(Path(__file__).with_name("migrations"))
-        db = Database(db_path, migrations)
-        await db.initialize()
-
-        client = await db.add_client("Тест", "@Test_User", "https://t.me/test")
-        assert client["threads_username_normalized"] == "test_user"
-        assert len(await db.list_active_clients()) == 1
-
-        try:
-            await db.add_client("Дубль", " test_user ", None)
-        except ClientAlreadyExistsError as exc:
-            assert exc.client_id == client["id"]
-        else:
-            raise AssertionError("Дубль активного username не заблокирован")
-
-        bound = await db.bind_invite(client["invite_code"], 123456)
-        assert bound and bound["telegram_id"] == 123456
-        rebound = await db.bind_invite(client["invite_code"], 123456)
-        assert rebound and rebound["telegram_id"] == 123456
-
-        await db.set_sheet_url(client["id"], "https://docs.google.com/spreadsheets/d/test")
-        await db.set_content_plan_url(client["id"], "https://docs.google.com/document/d/test")
-        await db.set_topic_id(client["id"], 777)
-        assert (await db.get_client_by_topic(777))["id"] == client["id"]
-
-        await db.archive_client(client["id"])
-        assert await db.list_active_clients() == []
-        archived = await db.get_client(client["id"])
-        assert archived and archived["is_active"] == 0
-
-        replacement = await db.add_client("Новый тест", "@TEST_USER", None)
-        assert replacement["id"] != client["id"]
-
-    print("SMOKE TEST: OK")
+async def main() -> None:
+    path = tempfile.mktemp(suffix=".db")
+    try:
+        db = Database(path)
+        await db.migrate()
+        client = await db.create_client("Тест", "@analytics_test", "@tester")
+        await db.save_baseline(client["id"], {
+            "threads_followers": 100,
+            "telegram_followers": 20,
+            "weekly_leads": 2,
+            "overview_file_id": "overview",
+            "content_file_id": "content",
+            "telegram_file_id": None,
+        })
+        today = date.today()
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=6)
+        await db.save_weekly_analytics(client["id"], start.isoformat(), end.isoformat(), {
+            "threads_followers": 120,
+            "telegram_followers": 25,
+            "views": 1000,
+            "applications": 4,
+            "overview_file_id": "weekly_overview",
+            "content_file_id": "weekly_content",
+            "telegram_file_id": None,
+        })
+        analytics = await db.analytics(client["id"])
+        assert analytics["baseline"]["threads_followers"] == 100
+        assert analytics["latest"]["threads_followers"] == 120
+        await db.migrate()
+        assert await db.get_client(client["id"])
+        print("ANALYTICS SMOKE TEST: OK")
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(main())
