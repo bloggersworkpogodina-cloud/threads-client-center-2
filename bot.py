@@ -191,15 +191,41 @@ async def clients(message: Message):
 
 @router.callback_query(F.data.startswith("client:"))
 async def client_card(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID: return
-    cid = int(callback.data.split(":")[1])
-    c = await db.get_client(cid)
-    status = "подключён" if c["telegram_id"] else "не подключён"
-    await callback.message.answer(
-        f"<b>{c['name']}</b>\nThreads: @{c['threads_username']}\nTelegram: {c['telegram_link'] or '—'}\nСтатус: {status}",
-        reply_markup=card_kb(cid, bool(c["sheet_url"]), bool(c["content_plan_url"]))
-    )
-    await callback.answer()
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer()
+        return
+
+    try:
+        cid = int(callback.data.split(":", 1)[1])
+        c = await db.get_client(cid)
+
+        if not c:
+            await callback.answer("Клиент не найден", show_alert=True)
+            return
+
+        status = "подключён" if c["telegram_id"] else "не подключён"
+
+        await callback.message.answer(
+            (
+                f"<b>{c['name']}</b>\n"
+                f"Threads: @{c['threads_username'] or '—'}\n"
+                f"Telegram: {c['telegram_link'] or '—'}\n"
+                f"Статус: {status}"
+            ),
+            reply_markup=card_kb(
+                cid,
+                bool(c["sheet_url"]),
+                bool(c["content_plan_url"]),
+            ),
+        )
+        await callback.answer()
+
+    except Exception as exc:
+        logging.exception("Ошибка открытия карточки клиента: %s", exc)
+        await callback.answer(
+            "Ошибка открытия карточки. Проверьте Deploy Logs.",
+            show_alert=True,
+        )
 
 @router.callback_query(F.data.startswith("sheet:"))
 async def sheet_start(callback: CallbackQuery, state: FSMContext):
