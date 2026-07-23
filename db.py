@@ -38,10 +38,28 @@ async def init_db():
         );
         """)
         # Миграции существующей базы без удаления данных.
+        # В Railway Volume может лежать БД от предыдущей версии бота.
+        # CREATE TABLE IF NOT EXISTS не добавляет новые колонки в уже существующую таблицу,
+        # поэтому явно доводим старую схему до текущей.
         cur = await db.execute("PRAGMA table_info(clients)")
         columns = {row[1] for row in await cur.fetchall()}
-        if "topic_id" not in columns:
-            await db.execute("ALTER TABLE clients ADD COLUMN topic_id INTEGER")
+
+        migrations = {
+            "threads_username": "TEXT",
+            "telegram_link": "TEXT",
+            "telegram_id": "INTEGER",
+            "invite_code": "TEXT",
+            "sheet_url": "TEXT",
+            "content_plan_url": "TEXT",
+            "topic_id": "INTEGER",
+            "is_active": "INTEGER NOT NULL DEFAULT 1",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+        }
+        for column, definition in migrations.items():
+            if column not in columns:
+                await db.execute(f"ALTER TABLE clients ADD COLUMN {column} {definition}")
+
         await db.commit()
 
 async def upsert_client(name, threads_username, telegram_link, invite_code):

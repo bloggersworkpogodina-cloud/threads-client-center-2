@@ -203,19 +203,24 @@ async def client_card(callback: CallbackQuery):
             await callback.answer("Клиент не найден", show_alert=True)
             return
 
-        status = "подключён" if c["telegram_id"] else "не подключён"
+        # Безопасно читаем поля: это защищает карточку при миграции старой Railway БД.
+        keys = set(c.keys())
+        def value(key, default=None):
+            return c[key] if key in keys else default
+
+        status = "подключён" if value("telegram_id") else "не подключён"
 
         await callback.message.answer(
             (
-                f"<b>{c['name']}</b>\n"
-                f"Threads: @{c['threads_username'] or '—'}\n"
-                f"Telegram: {c['telegram_link'] or '—'}\n"
+                f"<b>{value('name', 'Клиент')}</b>\n"
+                f"Threads: @{value('threads_username') or '—'}\n"
+                f"Telegram: {value('telegram_link') or '—'}\n"
                 f"Статус: {status}"
             ),
             reply_markup=card_kb(
                 cid,
-                bool(c["sheet_url"]),
-                bool(c["content_plan_url"]),
+                bool(value("sheet_url")),
+                bool(value("content_plan_url")),
             ),
         )
         await callback.answer()
