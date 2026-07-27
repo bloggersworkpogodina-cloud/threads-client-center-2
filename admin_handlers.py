@@ -69,7 +69,7 @@ async def add_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
     me = await bot.get_me(); invite = f"https://t.me/{me.username}?start=invite_{c['invite_code']}"
     c = await DB.get_client(c["id"])
     await DB.log_event(c["id"], "client_created")
-    await state.clear(); await callback.message.answer(card_text(c) + f"\n\nСсылка подключения:\n{invite}", reply_markup=client_card_kb(c["id"])); await callback.message.answer("Не забудьте зафиксировать стартовые показатели клиента через кнопку «🚀 Старт проекта»."); await callback.answer()
+    await state.clear(); await callback.message.answer(card_text(c) + f"\n\nСсылка подключения:\n{invite}", reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id)); await callback.message.answer("Не забудьте зафиксировать стартовые показатели клиента через кнопку «🚀 Старт проекта»."); await callback.answer()
 
 @router.callback_query(F.data == "client_confirm_edit")
 async def add_edit(callback: CallbackQuery, state: FSMContext):
@@ -93,7 +93,7 @@ async def view_client(callback: CallbackQuery):
     if not c:
         await callback.answer("Карточка устарела. Обновите список клиентов.", show_alert=True)
         return
-    await callback.message.answer(card_text(c), reply_markup=client_card_kb(c["id"]))
+    await callback.message.answer(card_text(c), reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id))
     await callback.answer()
 
 @router.callback_query(F.data.startswith("client_invite:"))
@@ -145,7 +145,7 @@ async def sheet_save(message: Message, state: FSMContext):
     client = await DB.get_client(client_id)
     await message.answer(
         f"Контент-план подключён ✅\nСтрок на первом листе: {check['rows']}",
-        reply_markup=client_card_kb(client["id"]),
+        reply_markup=client_card_kb(client["id"], client["topic_id"], SETTINGS.work_group_id),
     )
 
 @router.callback_query(F.data.startswith("client_send_posts:"))
