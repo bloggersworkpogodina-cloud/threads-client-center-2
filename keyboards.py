@@ -15,8 +15,7 @@ def confirm_client_kb():
 
 def client_card_kb(client_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Таблица", callback_data=f"client_sheet:{client_id}"), InlineKeyboardButton(text="📄 Контент-план", callback_data=f"client_plan:{client_id}")],
-        [InlineKeyboardButton(text="📤 Отправить ветки", callback_data=f"client_send_posts:{client_id}")],
+        [InlineKeyboardButton(text="📄 Контент-план", callback_data=f"client_sheet:{client_id}"), InlineKeyboardButton(text="📤 Отправить ветки", callback_data=f"client_send_posts:{client_id}")],
         [InlineKeyboardButton(text="🔗 Invite", callback_data=f"client_invite:{client_id}"), InlineKeyboardButton(text="🧵 Тема", callback_data=f"client_topic:{client_id}")],
         [InlineKeyboardButton(text="🚀 Старт проекта", callback_data=f"baseline_start:{client_id}"), InlineKeyboardButton(text="📈 Недельная статистика", callback_data=f"weekly_analytics:{client_id}")],
         [InlineKeyboardButton(text="📊 Аналитика клиента", callback_data=f"client_analytics:{client_id}")],

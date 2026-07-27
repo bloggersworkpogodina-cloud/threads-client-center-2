@@ -29,8 +29,8 @@ async def is_admin(user_id: int, router: Router) -> bool:
 
 def card_text(c):
     return (f"<b>{c['name']}</b>\n\nThreads: @{c['threads_username_normalized']}\nTelegram: @{c['telegram_username'] or '—'}\n"
-            f"Кабинет: {'подключён' if c['telegram_id'] else 'не подключён'}\nТаблица: {'подключена' if c['sheet_url'] else 'не подключена'}\n"
-            f"Контент-план: {'добавлен' if c['content_plan_url'] else 'не добавлен'}\nТема: {'создана' if c['topic_id'] else 'не создана'}\nСтатус: {'активен' if c['is_active'] else 'архив'}")
+            f"Кабинет: {'подключён' if c['telegram_id'] else 'не подключён'}\n"
+            f"Контент-план: {'подключён' if c['sheet_url'] else 'не подключён'}\nТема: {'создана' if c['topic_id'] else 'не создана'}\nСтатус: {'активен' if c['is_active'] else 'архив'}")
 
 @router.message(F.text == "➕ Добавить клиента")
 async def add_start(message: Message, state: FSMContext):
@@ -106,7 +106,7 @@ async def topic(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("client_sheet:"))
 async def sheet_start(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(client_id=int(callback.data.split(":")[1])); await state.set_state(LinkSheet.url); await callback.message.answer("Пришлите ссылку Google Sheets:"); await callback.answer()
+    await state.update_data(client_id=int(callback.data.split(":")[1])); await state.set_state(LinkSheet.url); await callback.message.answer("Пришлите ссылку на Google-таблицу контент-плана:"); await callback.answer()
 
 @router.message(LinkSheet.url)
 async def sheet_save(message: Message, state: FSMContext):
@@ -126,7 +126,7 @@ async def sheet_save(message: Message, state: FSMContext):
     try:
         check = await SHEETS.validate(url)
     except Exception as exc:
-        await message.answer(f"Не удалось подключить таблицу:\n{exc}\n\nИсправьте доступ или ссылку и пришлите её ещё раз.")
+        await message.answer(f"Не удалось подключить контент-план:\n{exc}\n\nИсправьте доступ или ссылку и пришлите её ещё раз.")
         return
 
     try:
@@ -140,11 +140,11 @@ async def sheet_save(message: Message, state: FSMContext):
         return
 
     await DB.log_event(client_id, "sheet_connected", {"rows": check["rows"]})
-    await topic_log(message.bot, DB, SETTINGS.work_group_id, client_id, "📊 Google-таблица подключена и проверена.")
+    await topic_log(message.bot, DB, SETTINGS.work_group_id, client_id, "📄 Контент-план подключён и проверен.")
     await state.clear()
     client = await DB.get_client(client_id)
     await message.answer(
-        f"Таблица подключена ✅\nСтрок на первом листе: {check['rows']}",
+        f"Контент-план подключён ✅\nСтрок на первом листе: {check['rows']}",
         reply_markup=client_card_kb(client["id"]),
     )
 

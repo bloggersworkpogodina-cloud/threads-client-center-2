@@ -67,9 +67,13 @@ async def posts(message: Message):
 @router.message(F.text == "📄 Контент-план")
 async def plan(message: Message):
     c=await DB.get_client_by_tg(message.from_user.id)
-    if not c or not c["content_plan_url"]: await message.answer("Контент-план пока не добавлен."); return
-    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Открыть контент-план",url=c["content_plan_url"])]])
-    await message.answer("Ваш контент-план:",reply_markup=kb)
+    if not c or not c["sheet_url"]:
+        await message.answer("Контент-план пока не добавлен.")
+        return
+    kb=InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="Открыть контент-план", url=c["sheet_url"])]]
+    )
+    await message.answer("Ваш контент-план:", reply_markup=kb)
 
 @router.message(F.text == "💬 Связь с менеджером")
 async def manager(message: Message,state:FSMContext):
