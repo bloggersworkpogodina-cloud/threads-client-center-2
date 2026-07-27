@@ -49,6 +49,7 @@ class Database:
             topic_id INTEGER,
             sheet_url TEXT,
             content_plan_url TEXT,
+            publish_mode TEXT NOT NULL DEFAULT 'client',
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -135,6 +136,10 @@ class Database:
         """
         async with self.connect() as conn:
             await conn.executescript(schema)
+            client_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(clients)")).fetchall()}
+            if "publish_mode" not in client_columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN publish_mode TEXT NOT NULL DEFAULT 'client'")
+
             weekly_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(weekly_stats)")).fetchall()}
             for column, definition in {
                 "threads_followers": "INTEGER NOT NULL DEFAULT 0",
@@ -181,19 +186,20 @@ class Database:
         value = value.strip().lstrip("@").split("?")[0].strip("/")
         return value or None
 
-    async def create_client(self, name: str, threads_username: str, telegram_username: str | None) -> aiosqlite.Row:
+    async def create_client(self, name: str, threads_username: str, telegram_username: str | None, publish_mode: str = "client") -> aiosqlite.Row:
         threads = self.normalize_threads(threads_username)
         telegram = self.normalize_telegram(telegram_username)
         invite_code = secrets.token_urlsafe(10)
+        publish_mode = publish_mode if publish_mode in {"client", "team"} else "client"
         now = datetime.utcnow().isoformat()
         async with self.connect() as conn:
             try:
                 cur = await conn.execute(
                     """
-                    INSERT INTO clients(name, threads_username_normalized, telegram_username, invite_code, is_active, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 1, ?, ?)
+                    INSERT INTO clients(name, threads_username_normalized, telegram_username, invite_code, publish_mode, is_active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
                     """,
-                    (name.strip(), threads, telegram, invite_code, now, now),
+                    (name.strip(), threads, telegram, invite_code, publish_mode, now, now),
                 )
                 await conn.commit()
             except aiosqlite.IntegrityError as exc:

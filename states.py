@@ -2,7 +2,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class AddClient(StatesGroup):
-    name = State(); threads = State(); telegram = State(); confirm = State()
+    name = State(); threads = State(); telegram = State(); publish_mode = State(); confirm = State()
 
 class LinkSheet(StatesGroup):
     url = State()

@@ -28,7 +28,10 @@ async def is_admin(user_id: int, router: Router) -> bool:
 
 
 def card_text(c):
+    publish_mode = c["publish_mode"] if "publish_mode" in c.keys() else "client"
+    publish_label = "👩‍💻 мы публикуем" if publish_mode == "team" else "👤 клиент публикует сам"
     return (f"<b>{c['name']}</b>\n\nThreads: @{c['threads_username_normalized']}\nTelegram: @{c['telegram_username'] or '—'}\n"
+            f"Публикация: {publish_label}\n"
             f"Кабинет: {'подключён' if c['telegram_id'] else 'не подключён'}\n"
             f"Контент-план: {'подключён' if c['sheet_url'] else 'не подключён'}\nТема: {'создана' if c['topic_id'] else 'не создана'}\nСтатус: {'активен' if c['is_active'] else 'архив'}")
 
@@ -53,23 +56,56 @@ async def add_threads(message: Message, state: FSMContext):
 
 @router.message(AddClient.telegram)
 async def add_telegram(message: Message, state: FSMContext):
-    data = await state.get_data(); telegram = (message.text or "").strip()
-    await state.update_data(telegram=telegram); await state.set_state(AddClient.confirm)
-    await message.answer(f"Проверьте данные:\n\nИмя: {data['name']}\nThreads: @{DB.normalize_threads(data['threads'])}\nTelegram: @{DB.normalize_telegram(telegram) or '—'}", reply_markup=confirm_client_kb())
+    telegram = (message.text or "").strip()
+    await state.update_data(telegram=telegram)
+    await state.set_state(AddClient.publish_mode)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="👤 Клиент сам", callback_data="add_publish_mode:client"),
+        InlineKeyboardButton(text="👩‍💻 Мы публикуем", callback_data="add_publish_mode:team"),
+    ]])
+    await message.answer("Кто публикует Threads для этого проекта?", reply_markup=kb)
+
+@router.callback_query(AddClient.publish_mode, F.data.startswith("add_publish_mode:"))
+async def add_publish_mode(callback: CallbackQuery, state: FSMContext):
+    mode = callback.data.split(":", 1)[1]
+    if mode not in {"client", "team"}:
+        await callback.answer("Неверный вариант", show_alert=True)
+        return
+    await state.update_data(publish_mode=mode)
+    await state.set_state(AddClient.confirm)
+    data = await state.get_data()
+    label = "👩‍💻 Мы публикуем" if mode == "team" else "👤 Клиент сам"
+    await callback.message.answer(
+        f"Проверьте данные:\n\n"
+        f"Имя: {data['name']}\n"
+        f"Threads: @{DB.normalize_threads(data['threads'])}\n"
+        f"Telegram: @{DB.normalize_telegram(data.get('telegram')) or '—'}\n"
+        f"Публикация: {label}",
+        reply_markup=confirm_client_kb(),
+    )
+    await callback.answer()
 
 @router.callback_query(F.data == "client_confirm_create")
 async def add_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if not await is_admin(callback.from_user.id, router): return
     data = await state.get_data()
     try:
-        c = await DB.create_client(data["name"], data["threads"], data.get("telegram"))
+        c = await DB.create_client(data["name"], data["threads"], data.get("telegram"), data.get("publish_mode", "client"))
     except ValueError as exc:
         await callback.message.answer(str(exc), reply_markup=admin_menu()); await state.clear(); await callback.answer(); return
     await ensure_topic(bot, DB, SETTINGS.work_group_id, c["id"])
-    me = await bot.get_me(); invite = f"https://t.me/{me.username}?start=invite_{c['invite_code']}"
     c = await DB.get_client(c["id"])
     await DB.log_event(c["id"], "client_created")
-    await state.clear(); await callback.message.answer(card_text(c) + f"\n\nСсылка подключения:\n{invite}", reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id)); await callback.message.answer("Не забудьте зафиксировать стартовые показатели клиента через кнопку «🚀 Старт проекта»."); await callback.answer()
+    await state.clear()
+    if c["publish_mode"] == "team":
+        extra = "\n\nПроект ведём мы — подключать клиента к боту необязательно."
+    else:
+        me = await bot.get_me()
+        invite = f"https://t.me/{me.username}?start=invite_{c['invite_code']}"
+        extra = f"\n\nСсылка подключения:\n{invite}"
+    await callback.message.answer(card_text(c) + extra, reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id))
+    await callback.message.answer("Не забудьте зафиксировать стартовые показатели клиента через кнопку «🚀 Старт проекта».")
+    await callback.answer()
 
 @router.callback_query(F.data == "client_confirm_edit")
 async def add_edit(callback: CallbackQuery, state: FSMContext):
