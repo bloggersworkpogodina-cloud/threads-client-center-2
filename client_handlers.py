@@ -77,46 +77,18 @@ async def manager(message: Message,state:FSMContext):
     if not c: await message.answer("Личный кабинет не найден."); return
     await state.set_state(ManagerMessage.text); await message.answer("Напишите сообщение менеджеру:")
 
-async def _forward_to_manager_topic(message: Message, client) -> bool:
-    """Copy a client message to that client's topic in the work group."""
-    settings = SETTINGS
-    tid = await ensure_topic(message.bot, DB, settings.work_group_id, client["id"])
-    if not settings.work_group_id or not tid:
-        return False
-
-    await message.bot.send_message(
-        settings.work_group_id,
-        "<b>Сообщение от клиента</b>",
-        message_thread_id=tid,
-    )
-    await message.bot.copy_message(
-        settings.work_group_id,
-        message.chat.id,
-        message.message_id,
-        message_thread_id=tid,
-    )
-    await DB.log_event(client["id"], "client_message")
-    return True
-
-
 @router.message(ManagerMessage.text)
 async def manager_send(message:Message,state:FSMContext):
-    c=await DB.get_client_by_tg(message.from_user.id)
-    if not c:
-        await state.clear()
-        return
-    try:
-        delivered = await _forward_to_manager_topic(message, c)
-        if delivered:
-            await message.answer("Сообщение отправлено менеджеру ✅",reply_markup=client_menu())
-        else:
-            await message.answer("Рабочий чат пока не настроен.",reply_markup=client_menu())
-    except Exception:
-        import logging
-        logging.exception("Не удалось передать сообщение клиента менеджеру")
-        await message.answer("Не удалось отправить сообщение менеджеру. Попробуйте ещё раз.",reply_markup=client_menu())
-    finally:
-        await state.clear()
+    c=await DB.get_client_by_tg(message.from_user.id); settings=SETTINGS
+    if not c: await state.clear(); return
+    tid=await ensure_topic(message.bot,DB,settings.work_group_id,c["id"])
+    if settings.work_group_id and tid:
+        await message.bot.send_message(settings.work_group_id,"<b>Сообщение от клиента</b>",message_thread_id=tid)
+        await message.bot.copy_message(settings.work_group_id,message.chat.id,message.message_id,message_thread_id=tid)
+        await DB.log_event(c["id"],"client_message")
+        await message.answer("Сообщение отправлено менеджеру ✅",reply_markup=client_menu())
+    else: await message.answer("Рабочий чат пока не настроен.",reply_markup=client_menu())
+    await state.clear()
 
 @router.message(F.text == "📊 Мои результаты")
 async def results_start(message:Message,state:FSMContext):
@@ -162,31 +134,6 @@ async def partial(m:Message,s:FSMContext):
     except ValueError: await m.answer("Введите число:"); return
     v=max(0,min(v,d["total"])); await DB.save_publication_confirmation(d["client_id"],d["day"],d["total"],v,"partial"); await topic_log(m.bot,DB,SETTINGS.work_group_id,d["client_id"],f"🟡 Опубликована часть: {v} из {d['total']}"); await s.clear(); await m.answer("Сохранено ✅",reply_markup=client_menu())
 
-@router.message(F.chat.type == "private")
-async def client_message_bridge(message: Message, state: FSMContext):
-    """Forward ordinary client messages without requiring the manager button."""
-    # Admin messages and replies belonging to active bot scenarios must not be bridged.
-    if message.from_user.id == SETTINGS.admin_id:
-        return
-    if await state.get_state():
-        return
-
-    c = await DB.get_client_by_tg(message.from_user.id)
-    if not c:
-        return
-
-    try:
-        delivered = await _forward_to_manager_topic(message, c)
-        if delivered:
-            await message.answer("Сообщение отправлено менеджеру ✅")
-        else:
-            await message.answer("Рабочий чат пока не настроен.")
-    except Exception:
-        import logging
-        logging.exception("Не удалось автоматически передать сообщение клиента менеджеру")
-        await message.answer("Не удалось отправить сообщение менеджеру. Попробуйте ещё раз.")
-
-
 @router.message(F.chat.type.in_({"supergroup","group"}))
 async def manager_reply(message:Message):
     settings=SETTINGS
@@ -195,3 +142,70 @@ async def manager_reply(message:Message):
     if not c or not c["telegram_id"]: return
     await message.bot.copy_message(c["telegram_id"],message.chat.id,message.message_id)
     await DB.log_event(c["id"],"manager_message")
+
+
+# ---------------------------------------------------------------------------
+# Direct client -> manager bridge
+# Registered clients can write to the bot at any time without first pressing
+# "Связь с менеджером". Existing menu/FSM handlers above keep priority.
+# ---------------------------------------------------------------------------
+@router.message(F.chat.type == "private")
+async def client_direct_message_bridge(message: Message, state: FSMContext):
+    # Admin messages are handled only by admin flows.
+    if message.from_user.id == SETTINGS.admin_id:
+        return
+
+    # Do not steal messages from an active FSM scenario
+    # (results, manager-message flow, publication confirmation, etc.).
+    if await state.get_state():
+        return
+
+    client = await DB.get_client_by_tg(message.from_user.id)
+    if not client:
+        return
+
+    # Menu buttons are already handled by the dedicated handlers above.
+    if message.text in {
+        "/start",
+        "📅 Ветки",
+        "📄 Контент-план",
+        "📊 Мои результаты",
+        "💬 Связь с менеджером",
+    }:
+        return
+
+    try:
+        topic_id = await ensure_topic(
+            message.bot,
+            DB,
+            SETTINGS.work_group_id,
+            client["id"],
+        )
+        if not SETTINGS.work_group_id or not topic_id:
+            await message.answer("Рабочий чат пока не настроен.")
+            return
+
+        await message.bot.send_message(
+            SETTINGS.work_group_id,
+            "<b>Сообщение от клиента</b>",
+            message_thread_id=topic_id,
+        )
+        await message.bot.copy_message(
+            chat_id=SETTINGS.work_group_id,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+            message_thread_id=topic_id,
+        )
+        await DB.log_event(client["id"], "client_message")
+        await message.answer(
+            "Сообщение отправлено менеджеру ✅",
+            reply_markup=client_menu(),
+        )
+    except Exception:
+        import logging
+        logging.exception(
+            "Не удалось передать прямое сообщение клиента в рабочую тему"
+        )
+        await message.answer(
+            "Не удалось передать сообщение менеджеру. Попробуйте ещё раз чуть позже."
+        )
