@@ -49,6 +49,13 @@ class Database:
             topic_id INTEGER,
             sheet_url TEXT,
             content_plan_url TEXT,
+            contract_file_id TEXT,
+            policy_file_id TEXT,
+            services TEXT,
+            service_price INTEGER,
+            legal_name TEXT,
+            contract_version TEXT,
+            policy_version TEXT,
             publish_mode TEXT NOT NULL DEFAULT 'client',
             is_active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
@@ -133,12 +140,45 @@ class Database:
             payload_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS client_consents (
+            client_id INTEGER PRIMARY KEY REFERENCES clients(id),
+            signer_name TEXT NOT NULL,
+            telegram_id INTEGER NOT NULL,
+            telegram_username TEXT,
+            contract_file_id TEXT NOT NULL,
+            policy_file_id TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            contract_accepted_at TEXT,
+            pd_consent_at TEXT
+        );
         """
         async with self.connect() as conn:
             await conn.executescript(schema)
             client_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(clients)")).fetchall()}
             if "publish_mode" not in client_columns:
                 await conn.execute("ALTER TABLE clients ADD COLUMN publish_mode TEXT NOT NULL DEFAULT 'client'")
+
+            if "contract_file_id" not in client_columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN contract_file_id TEXT")
+            if "policy_file_id" not in client_columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN policy_file_id TEXT")
+            if "services" not in client_columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN services TEXT")
+            if "service_price" not in client_columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN service_price INTEGER")
+            if "legal_name" not in client_columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN legal_name TEXT")
+            if "contract_version" not in client_columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN contract_version TEXT")
+            if "policy_version" not in client_columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN policy_version TEXT")
+
+            consent_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(client_consents)")).fetchall()}
+            if "contract_accepted_at" not in consent_columns:
+                await conn.execute("ALTER TABLE client_consents ADD COLUMN contract_accepted_at TEXT")
+            if "pd_consent_at" not in consent_columns:
+                await conn.execute("ALTER TABLE client_consents ADD COLUMN pd_consent_at TEXT")
 
             weekly_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(weekly_stats)")).fetchall()}
             for column, definition in {
@@ -158,7 +198,7 @@ class Database:
             await conn.commit()
             required = {
                 "clients", "daily_posts", "publication_confirmations",
-                "client_results", "weekly_stats", "client_baseline", "client_events",
+                "client_results", "weekly_stats", "client_baseline", "client_events", "client_consents",
             }
             rows = await (await conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -186,7 +226,7 @@ class Database:
         value = value.strip().lstrip("@").split("?")[0].strip("/")
         return value or None
 
-    async def create_client(self, name: str, threads_username: str, telegram_username: str | None, publish_mode: str = "client") -> aiosqlite.Row:
+    async def create_client(self, name: str, threads_username: str, telegram_username: str | None, publish_mode: str = "client", services: str | None = None, service_price: int | None = None) -> aiosqlite.Row:
         threads = self.normalize_threads(threads_username)
         telegram = self.normalize_telegram(telegram_username)
         invite_code = secrets.token_urlsafe(10)
@@ -196,16 +236,32 @@ class Database:
             try:
                 cur = await conn.execute(
                     """
-                    INSERT INTO clients(name, threads_username_normalized, telegram_username, invite_code, publish_mode, is_active, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    INSERT INTO clients(name, threads_username_normalized, telegram_username, invite_code, publish_mode, services, service_price, is_active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
-                    (name.strip(), threads, telegram, invite_code, publish_mode, now, now),
+                    (name.strip(), threads, telegram, invite_code, publish_mode, (services or "").strip() or None, service_price, now, now),
                 )
                 await conn.commit()
             except aiosqlite.IntegrityError as exc:
                 raise ValueError("Активный клиент с таким Threads username уже существует") from exc
             row = await (await conn.execute("SELECT * FROM clients WHERE id = ?", (cur.lastrowid,))).fetchone()
             return row
+
+
+    async def update_client_terms(self, client_id: int, services: str, service_price: int) -> None:
+        now = datetime.utcnow().isoformat()
+        async with self.connect() as conn:
+            await conn.execute(
+                """UPDATE clients
+                   SET services = ?, service_price = ?,
+                       contract_file_id = NULL, policy_file_id = NULL,
+                       contract_version = NULL, policy_version = NULL,
+                       updated_at = ?
+                   WHERE id = ?""",
+                ((services or "").strip() or None, int(service_price), now, client_id),
+            )
+            await conn.execute("DELETE FROM client_consents WHERE client_id = ?", (client_id,))
+            await conn.commit()
 
     async def list_clients(self, active_only: bool = True):
         q = "SELECT * FROM clients"
@@ -368,3 +424,108 @@ class Database:
             )
             await conn.commit()
             return True
+
+
+    async def set_client_documents(
+        self,
+        client_id: int,
+        contract_file_id: str | None = None,
+        policy_file_id: str | None = None,
+        contract_version: str | None = None,
+        policy_version: str | None = None,
+        reset_acceptance: bool = True,
+    ) -> None:
+        async with self.connect() as conn:
+            row = await (await conn.execute("SELECT * FROM clients WHERE id = ?", (client_id,))).fetchone()
+            if not row:
+                raise LookupError("Client not found")
+            contract = contract_file_id if contract_file_id is not None else row["contract_file_id"]
+            policy = policy_file_id if policy_file_id is not None else row["policy_file_id"]
+            cver = contract_version if contract_version is not None else row["contract_version"]
+            pver = policy_version if policy_version is not None else row["policy_version"]
+            await conn.execute(
+                """UPDATE clients
+                   SET contract_file_id = ?, policy_file_id = ?,
+                       contract_version = ?, policy_version = ?, updated_at = ?
+                   WHERE id = ?""",
+                (contract, policy, cver, pver, datetime.utcnow().isoformat(), client_id),
+            )
+            if reset_acceptance:
+                await conn.execute("DELETE FROM client_consents WHERE client_id = ?", (client_id,))
+            await conn.commit()
+
+    async def set_client_legal_name(self, client_id: int, legal_name: str) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                "UPDATE clients SET legal_name = ?, updated_at = ? WHERE id = ?",
+                (legal_name.strip(), datetime.utcnow().isoformat(), client_id),
+            )
+            await conn.commit()
+
+    async def invalidate_client_documents(self, client_id: int) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                """UPDATE clients
+                   SET contract_file_id = NULL, policy_file_id = NULL,
+                       contract_version = NULL, policy_version = NULL,
+                       updated_at = ?
+                   WHERE id = ?""",
+                (datetime.utcnow().isoformat(), client_id),
+            )
+            await conn.execute("DELETE FROM client_consents WHERE client_id = ?", (client_id,))
+            await conn.commit()
+
+    async def get_client_consent(self, client_id: int):
+        async with self.connect() as conn:
+            return await (await conn.execute(
+                "SELECT * FROM client_consents WHERE client_id = ?",
+                (client_id,),
+            )).fetchone()
+
+    async def save_contract_acceptance(
+        self,
+        client_id: int,
+        signer_name: str,
+        telegram_id: int,
+        telegram_username: str | None,
+        contract_file_id: str,
+        policy_file_id: str,
+    ) -> None:
+        now = datetime.utcnow().isoformat()
+        async with self.connect() as conn:
+            await conn.execute(
+                """
+                INSERT INTO client_consents(
+                    client_id, signer_name, telegram_id, telegram_username,
+                    contract_file_id, policy_file_id, accepted_at,
+                    contract_accepted_at, pd_consent_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(client_id) DO UPDATE SET
+                    signer_name=excluded.signer_name,
+                    telegram_id=excluded.telegram_id,
+                    telegram_username=excluded.telegram_username,
+                    contract_file_id=excluded.contract_file_id,
+                    policy_file_id=excluded.policy_file_id,
+                    accepted_at=excluded.accepted_at,
+                    contract_accepted_at=excluded.contract_accepted_at,
+                    pd_consent_at=NULL
+                """,
+                (
+                    client_id, signer_name.strip(), telegram_id, telegram_username,
+                    contract_file_id, policy_file_id, now, now,
+                ),
+            )
+            await conn.commit()
+
+    async def save_pd_consent(self, client_id: int) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                "UPDATE client_consents SET pd_consent_at = ?, accepted_at = ? WHERE client_id = ?",
+                (datetime.utcnow().isoformat(), datetime.utcnow().isoformat(), client_id),
+            )
+            await conn.commit()
+
+    async def documents_fully_accepted(self, client_id: int) -> bool:
+        row = await self.get_client_consent(client_id)
+        return bool(row and row["contract_accepted_at"] and row["pd_consent_at"])

@@ -33,6 +33,7 @@ def client_card_kb(client_id: int, topic_id: int | None = None, work_group_id: i
         [InlineKeyboardButton(text="🔗 Invite", callback_data=f"client_invite:{client_id}"), topic_button],
         [InlineKeyboardButton(text="🚀 Старт проекта", callback_data=f"baseline_start:{client_id}"), InlineKeyboardButton(text="📈 Недельная статистика", callback_data=f"weekly_analytics:{client_id}")],
         [InlineKeyboardButton(text="📊 Аналитика клиента", callback_data=f"client_analytics:{client_id}")],
+        [InlineKeyboardButton(text="📑 Документы", callback_data=f"client_docs:{client_id}"), InlineKeyboardButton(text="💼 Услуги и стоимость", callback_data=f"client_terms:{client_id}")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"client_view:{client_id}"), InlineKeyboardButton(text="🔴 Закрыть", callback_data=f"client_archive:{client_id}")],
     ])
 
@@ -46,3 +47,21 @@ def skip_photo_kb(callback_data: str):
 
 def analytics_clients_kb(clients, prefix: str):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=c["name"], callback_data=f"{prefix}:{c['id']}")] for c in clients])
+
+
+def docs_begin_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📑 Перейти к документам", callback_data="docs_begin")]
+    ])
+
+
+def contract_accept_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Подписать договор", callback_data="contract_accept")]
+    ])
+
+
+def pd_consent_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Даю согласие на обработку персональных данных", callback_data="pd_consent_accept")]
+    ])

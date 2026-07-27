@@ -16,6 +16,11 @@ class Settings:
     daily_send_hour: int
     confirmation_hour: int
     google_service_account_json: str | None
+    executor_name: str
+    executor_inn: str
+    executor_email: str
+    executor_ogrnip: str
+    executor_address: str
 
     @property
     def tz(self) -> ZoneInfo:
@@ -42,4 +47,9 @@ def load_settings() -> Settings:
         daily_send_hour=int(os.getenv("DAILY_SEND_HOUR", "8")),
         confirmation_hour=int(os.getenv("CONFIRMATION_HOUR", "20")),
         google_service_account_json=google_json,
+        executor_name=os.getenv("EXECUTOR_NAME", "ИП Погодина Анастасия Александровна").strip(),
+        executor_inn=os.getenv("EXECUTOR_INN", "526333028306").strip(),
+        executor_email=os.getenv("EXECUTOR_EMAIL", "pogodinabrand@ya.ru").strip(),
+        executor_ogrnip=os.getenv("EXECUTOR_OGRNIP", "").strip(),
+        executor_address=os.getenv("EXECUTOR_ADDRESS", "").strip(),
     )

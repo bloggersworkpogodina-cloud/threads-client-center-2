@@ -6,10 +6,11 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from states import ManagerMessage, PartialPublication, ResultsFlow
-from keyboards import admin_menu, client_menu
+from states import ManagerMessage, PartialPublication, ResultsFlow, ConsentFlow
+from keyboards import admin_menu, client_menu, docs_begin_kb, contract_accept_kb, pd_consent_kb
 from posts import send_today_posts
 from topics import ensure_topic, topic_log
+from documents import generate_contract_pdf, generate_policy_pdf, contract_version, policy_version, temp_pdf
 
 router = Router()
 DB = None
@@ -20,54 +21,281 @@ def configure(db, settings, sheets):
     global DB, SETTINGS, SHEETS
     DB, SETTINGS, SHEETS = db, settings, sheets
 
+
+async def _documents_gate(message: Message, client) -> bool:
+    """Return True only after contract acceptance and separate PD consent."""
+    if await DB.documents_fully_accepted(client["id"]):
+        return True
+    await message.answer(
+        "Перед продолжением нужно оформить документы.",
+        reply_markup=docs_begin_kb(),
+    )
+    return False
+
+
+async def _show_client_cabinet(message: Message):
+    await message.answer("""👋 <b>Добро пожаловать в личный кабинет!</b>
+
+Здесь собраны все материалы для вашей работы и продвижения в Threads.
+
+<b>Что доступно:</b>
+
+📅 <b>Ветки</b> — готовые публикации на сегодня.
+📄 <b>Контент-план</b> — стратегия и календарь контента.
+📊 <b>Мои результаты</b> — фиксация статистики и прогресса.
+💬 <b>Связь с менеджером</b> — помощь и ответы на вопросы.
+
+🚀 Желаем продуктивной работы и отличных результатов!""", reply_markup=client_menu())
+
+
+async def _send_current_documents(message: Message, client):
+    signer = client["legal_name"]
+    if not signer:
+        raise RuntimeError("legal_name is required")
+
+    expected_contract_version = contract_version(client, signer, SETTINGS)
+    expected_policy_version = policy_version(SETTINGS)
+
+    # Reuse Telegram files if terms/version have not changed.
+    if (
+        client["contract_file_id"] and client["policy_file_id"]
+        and client["contract_version"] == expected_contract_version
+        and client["policy_version"] == expected_policy_version
+    ):
+        await message.answer_document(
+            client["contract_file_id"],
+            caption="📄 <b>Договор оказания услуг</b>"
+        )
+        await message.answer_document(
+            client["policy_file_id"],
+            caption="🔐 <b>Политика обработки персональных данных</b>"
+        )
+        return
+
+    contract_path = temp_pdf(f"contract_{client['id']}_")
+    policy_path = temp_pdf("policy_")
+    try:
+        generate_contract_pdf(client, signer, SETTINGS, contract_path, draft=False)
+        generate_policy_pdf(SETTINGS, policy_path)
+
+        sent_contract = await message.answer_document(
+            document=__import__("aiogram.types", fromlist=["FSInputFile"]).FSInputFile(contract_path),
+            caption="📄 <b>Договор оказания услуг</b>\nПроверьте услуги, стоимость и ваши ФИО."
+        )
+        sent_policy = await message.answer_document(
+            document=__import__("aiogram.types", fromlist=["FSInputFile"]).FSInputFile(policy_path),
+            caption="🔐 <b>Политика обработки персональных данных</b>"
+        )
+
+        await DB.set_client_documents(
+            client["id"],
+            contract_file_id=sent_contract.document.file_id,
+            policy_file_id=sent_policy.document.file_id,
+            contract_version=expected_contract_version,
+            policy_version=expected_policy_version,
+            reset_acceptance=True,
+        )
+    finally:
+        for path in (contract_path, policy_path):
+            try:
+                __import__("os").remove(path)
+            except OSError:
+                pass
+
+
+async def _begin_documents(message: Message, state: FSMContext, client):
+    if await DB.documents_fully_accepted(client["id"]):
+        await _show_client_cabinet(message)
+        return
+
+    if not client["services"] or not client["service_price"]:
+        await message.answer(
+            "Менеджер ещё не заполнил услуги и стоимость проекта. "
+            "Документы будут доступны после заполнения карточки."
+        )
+        return
+
+    if not client["legal_name"]:
+        await state.set_state(ConsentFlow.signer_name)
+        await message.answer(
+            "Для формирования договора введите ваши ФИО полностью.\n\n"
+            "Например: Иванов Иван Иванович."
+        )
+        return
+
+    await _send_current_documents(message, client)
+    await message.answer(
+        "Пожалуйста, ознакомьтесь с договором.\n\n"
+        "Нажимая «Подписать договор», вы подтверждаете, что прочитали документ "
+        "и принимаете его условия.",
+        reply_markup=contract_accept_kb(),
+    )
+
+
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
-    await state.clear(); db=DB; settings=SETTINGS
+    await state.clear()
+    db = DB
+    settings = SETTINGS
+
     if message.from_user.id == settings.admin_id:
-        await message.answer("Админ-центр Threads Client Center 2.0", reply_markup=admin_menu()); return
+        await message.answer("Админ-центр Threads Client Center 2.0", reply_markup=admin_menu())
+        return
+
     current = await db.get_client_by_tg(message.from_user.id)
     if current:
-        await message.answer("""👋 <b>Добро пожаловать в личный кабинет!</b>
+        await _begin_documents(message, state, current)
+        return
 
-Здесь собраны все материалы для вашей работы и продвижения в Threads.
-
-<b>Что доступно:</b>
-
-📅 <b>Ветки</b> — готовые публикации на сегодня.
-📄 <b>Контент-план</b> — стратегия и календарь контента.
-📊 <b>Мои результаты</b> — фиксация статистики и прогресса.
-💬 <b>Связь с менеджером</b> — помощь и ответы на вопросы.
-
-🚀 Желаем продуктивной работы и отличных результатов!""", reply_markup=client_menu()); return
-    parts=(message.text or "").split(maxsplit=1)
-    if len(parts)==2 and parts[1].startswith("invite_"):
-        c=await db.bind_client(parts[1][7:],message.from_user.id)
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) == 2 and parts[1].startswith("invite_"):
+        c = await db.bind_client(parts[1][7:], message.from_user.id)
         if c:
-            await db.log_event(c["id"],"client_bound"); await topic_log(message.bot,db,settings.work_group_id,c["id"],"✅ Клиент подключил личный кабинет."); await message.answer("""👋 <b>Добро пожаловать в личный кабинет!</b>
+            await db.log_event(c["id"], "client_bound")
+            await topic_log(
+                message.bot,
+                db,
+                settings.work_group_id,
+                c["id"],
+                "✅ Клиент подключил личный кабинет.",
+            )
+            c = await db.get_client(c["id"])
+            await _begin_documents(message, state, c)
+            return
 
-Здесь собраны все материалы для вашей работы и продвижения в Threads.
-
-<b>Что доступно:</b>
-
-📅 <b>Ветки</b> — готовые публикации на сегодня.
-📄 <b>Контент-план</b> — стратегия и календарь контента.
-📊 <b>Мои результаты</b> — фиксация статистики и прогресса.
-💬 <b>Связь с менеджером</b> — помощь и ответы на вопросы.
-
-🚀 Желаем продуктивной работы и отличных результатов!""",reply_markup=client_menu()); return
     await message.answer("Ссылка подключения недействительна или кабинет ещё не создан.")
+
+
+@router.callback_query(F.data == "docs_begin")
+async def docs_begin(callback: CallbackQuery, state: FSMContext):
+    c = await DB.get_client_by_tg(callback.from_user.id)
+    if not c:
+        await callback.answer("Кабинет не найден", show_alert=True)
+        return
+    await _begin_documents(callback.message, state, c)
+    await callback.answer()
+
+
+@router.message(ConsentFlow.signer_name)
+async def docs_signer_name(message: Message, state: FSMContext):
+    c = await DB.get_client_by_tg(message.from_user.id)
+    if not c:
+        await state.clear()
+        return
+    signer = (message.text or "").strip()
+    if len(signer.split()) < 2 or len(signer) < 5:
+        await message.answer("Введите ФИО полностью, например: Иванов Иван Иванович.")
+        return
+
+    await DB.set_client_legal_name(c["id"], signer)
+    await DB.invalidate_client_documents(c["id"])
+    await state.clear()
+    c = await DB.get_client(c["id"])
+    await _send_current_documents(message, c)
+    await message.answer(
+        "Пожалуйста, ознакомьтесь с договором.\n\n"
+        "Нажимая «Подписать договор», вы подтверждаете, что прочитали документ "
+        "и принимаете его условия.",
+        reply_markup=contract_accept_kb(),
+    )
+
+
+@router.callback_query(F.data == "contract_accept")
+async def contract_accept(callback: CallbackQuery, state: FSMContext):
+    c = await DB.get_client_by_tg(callback.from_user.id)
+    if not c or not c["legal_name"]:
+        await callback.answer("Сначала укажите ФИО", show_alert=True)
+        return
+    if not c["contract_file_id"] or not c["policy_file_id"]:
+        await callback.answer("Документы нужно сформировать заново", show_alert=True)
+        await _begin_documents(callback.message, state, c)
+        return
+
+    await DB.save_contract_acceptance(
+        c["id"],
+        c["legal_name"],
+        callback.from_user.id,
+        callback.from_user.username,
+        c["contract_file_id"],
+        c["policy_file_id"],
+    )
+    await DB.log_event(
+        c["id"],
+        "contract_accepted",
+        {
+            "signer_name": c["legal_name"],
+            "telegram_id": callback.from_user.id,
+            "contract_version": c["contract_version"],
+        },
+    )
+    await topic_log(
+        callback.bot, DB, SETTINGS.work_group_id, c["id"],
+        f"✍️ Клиент подписал договор.\nФИО: {c['legal_name']}\nTelegram ID: {callback.from_user.id}\nВерсия: {c['contract_version']}"
+    )
+
+    await callback.message.answer(
+        "<b>Согласие на обработку персональных данных</b>\n\n"
+        "Я свободно, своей волей и в своем интересе даю согласие "
+        f"{SETTINGS.executor_name} на обработку моих персональных данных "
+        "для заключения и исполнения договора, коммуникации по проекту, "
+        "ведения статистики и предоставления материалов. "
+        f"С Политикой обработки персональных данных я ознакомлен(а). "
+        f"Отозвать согласие можно через {SETTINGS.executor_email}.",
+        reply_markup=pd_consent_kb(),
+    )
+    await callback.answer("Договор подтверждён ✅")
+
+
+@router.callback_query(F.data == "pd_consent_accept")
+async def pd_consent_accept(callback: CallbackQuery, state: FSMContext):
+    c = await DB.get_client_by_tg(callback.from_user.id)
+    if not c:
+        await callback.answer("Кабинет не найден", show_alert=True)
+        return
+    consent = await DB.get_client_consent(c["id"])
+    if not consent or not consent["contract_accepted_at"]:
+        await callback.answer("Сначала подпишите договор", show_alert=True)
+        return
+
+    await DB.save_pd_consent(c["id"])
+    await DB.log_event(
+        c["id"],
+        "pd_consent_accepted",
+        {
+            "signer_name": c["legal_name"],
+            "telegram_id": callback.from_user.id,
+            "policy_version": c["policy_version"],
+        },
+    )
+    await topic_log(
+        callback.bot, DB, SETTINGS.work_group_id, c["id"],
+        f"✅ Клиент дал согласие на обработку персональных данных.\n"
+        f"ФИО: {c['legal_name']}\nTelegram ID: {callback.from_user.id}\n"
+        f"Версия политики: {c['policy_version']}"
+    )
+    await callback.answer("Согласие сохранено ✅")
+    await callback.message.answer(
+        "✅ Документы оформлены. Личный кабинет открыт.",
+        reply_markup=client_menu(),
+    )
 
 @router.message(F.text == "📅 Ветки")
 async def posts(message: Message):
     c=await DB.get_client_by_tg(message.from_user.id)
     if not c: await message.answer("Личный кабинет не найден."); return
+    if not await _documents_gate(message, c): return
     ok,text=await send_today_posts(message.bot,DB,SHEETS,SETTINGS,c,force=False)
     if not ok: await message.answer(text)
 
 @router.message(F.text == "📄 Контент-план")
 async def plan(message: Message):
     c=await DB.get_client_by_tg(message.from_user.id)
-    if not c or not c["sheet_url"]:
+    if not c:
+        await message.answer("Личный кабинет не найден.")
+        return
+    if not await _documents_gate(message, c):
+        return
+    if not c["sheet_url"]:
         await message.answer("Контент-план пока не добавлен.")
         return
     kb=InlineKeyboardMarkup(
@@ -79,6 +307,7 @@ async def plan(message: Message):
 async def manager(message: Message,state:FSMContext):
     c=await DB.get_client_by_tg(message.from_user.id)
     if not c: await message.answer("Личный кабинет не найден."); return
+    if not await _documents_gate(message, c): return
     await state.set_state(ManagerMessage.text); await message.answer("Напишите сообщение менеджеру:")
 
 @router.message(ManagerMessage.text)
@@ -98,6 +327,7 @@ async def manager_send(message:Message,state:FSMContext):
 async def results_start(message:Message,state:FSMContext):
     c=await DB.get_client_by_tg(message.from_user.id)
     if not c: return
+    if not await _documents_gate(message, c): return
     await state.set_state(ResultsFlow.responses); await message.answer("Сколько было откликов за последние 2 дня?")
 
 @router.message(ResultsFlow.responses)
@@ -166,6 +396,8 @@ async def client_direct_message_bridge(message: Message, state: FSMContext):
 
     client = await DB.get_client_by_tg(message.from_user.id)
     if not client:
+        return
+    if not await DB.documents_fully_accepted(client["id"]):
         return
 
     # Menu buttons are already handled by the dedicated handlers above.

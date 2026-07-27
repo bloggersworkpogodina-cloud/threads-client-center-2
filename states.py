@@ -2,7 +2,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 class AddClient(StatesGroup):
-    name = State(); threads = State(); telegram = State(); publish_mode = State(); confirm = State()
+    name = State(); threads = State(); telegram = State(); publish_mode = State(); services = State(); service_price = State(); confirm = State()
 
 class LinkSheet(StatesGroup):
     url = State()
@@ -39,3 +39,16 @@ class WeeklyAnalyticsFlow(StatesGroup):
     overview_screen = State()
     content_screen = State()
     telegram_screen = State()
+
+
+class ClientDocsFlow(StatesGroup):
+    contract = State()
+    policy = State()
+
+class ConsentFlow(StatesGroup):
+    signer_name = State()
+
+
+class ClientTermsFlow(StatesGroup):
+    services = State()
+    service_price = State()

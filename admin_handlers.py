@@ -5,9 +5,10 @@ from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow, BaselineFlow, WeeklyAnalyticsFlow
+from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow, BaselineFlow, WeeklyAnalyticsFlow, ClientDocsFlow, ClientTermsFlow
 from keyboards import admin_menu, client_card_kb, confirm_client_kb, skip_photo_kb
 from topics import ensure_topic, topic_log
+from documents import generate_contract_pdf, generate_policy_pdf, temp_pdf
 from posts import send_today_posts
 
 router = Router()
@@ -30,10 +31,14 @@ async def is_admin(user_id: int, router: Router) -> bool:
 def card_text(c):
     publish_mode = c["publish_mode"] if "publish_mode" in c.keys() else "client"
     publish_label = "👩‍💻 мы публикуем" if publish_mode == "team" else "👤 клиент публикует сам"
+    price_text = f"{c['service_price']:,}".replace(",", " ") + " ₽/мес." if c["service_price"] else "—"
     return (f"<b>{c['name']}</b>\n\nThreads: @{c['threads_username_normalized']}\nTelegram: @{c['telegram_username'] or '—'}\n"
             f"Публикация: {publish_label}\n"
+            f"Услуги: {c['services'] or '—'}\n"
+            f"Стоимость: {price_text}\n"
             f"Кабинет: {'подключён' if c['telegram_id'] else 'не подключён'}\n"
-            f"Контент-план: {'подключён' if c['sheet_url'] else 'не подключён'}\nТема: {'создана' if c['topic_id'] else 'не создана'}\nСтатус: {'активен' if c['is_active'] else 'архив'}")
+            f"Контент-план: {'подключён' if c['sheet_url'] else 'не подключён'}\n"
+            f"Документы: {'✅ загружены' if c['contract_file_id'] and c['policy_file_id'] else '⏳ не загружены'}\nТема: {'создана' if c['topic_id'] else 'не создана'}\nСтатус: {'активен' if c['is_active'] else 'архив'}")
 
 @router.message(F.text == "➕ Добавить клиента")
 async def add_start(message: Message, state: FSMContext):
@@ -72,36 +77,77 @@ async def add_publish_mode(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Неверный вариант", show_alert=True)
         return
     await state.update_data(publish_mode=mode)
+    await state.set_state(AddClient.services)
+    await callback.message.answer(
+        "Какие услуги оказываем клиенту?\n\n"
+        "Напишите свободным текстом, например:\n"
+        "Стратегия продвижения, 4 ветки ежедневно, публикация контента, аналитика"
+    )
+    await callback.answer()
+
+
+@router.message(AddClient.services)
+async def add_services(message: Message, state: FSMContext):
+    services = (message.text or "").strip()
+    if len(services) < 3:
+        await message.answer("Опишите услуги чуть подробнее.")
+        return
+    await state.update_data(services=services)
+    await state.set_state(AddClient.service_price)
+    await message.answer("Стоимость услуг в месяц?\n\nВведите сумму, например: 30000")
+
+
+@router.message(AddClient.service_price)
+async def add_service_price(message: Message, state: FSMContext):
+    raw = (message.text or "").strip().lower().replace(" ", "").replace("₽", "").replace("рублей", "").replace("руб.", "").replace("руб", "")
+    if not raw.isdigit():
+        await message.answer("Введите стоимость числом, например: 30000")
+        return
+    price = int(raw)
+    if price <= 0:
+        await message.answer("Стоимость должна быть больше 0.")
+        return
+
+    await state.update_data(service_price=price)
     await state.set_state(AddClient.confirm)
     data = await state.get_data()
-    label = "👩‍💻 Мы публикуем" if mode == "team" else "👤 Клиент сам"
-    await callback.message.answer(
+    label = "👩‍💻 Мы публикуем" if data.get("publish_mode") == "team" else "👤 Клиент сам"
+    price_text = f"{price:,}".replace(",", " ")
+    await message.answer(
         f"Проверьте данные:\n\n"
         f"Имя: {data['name']}\n"
         f"Threads: @{DB.normalize_threads(data['threads'])}\n"
         f"Telegram: @{DB.normalize_telegram(data.get('telegram')) or '—'}\n"
-        f"Публикация: {label}",
+        f"Публикация: {label}\n"
+        f"Услуги: {data['services']}\n"
+        f"Стоимость: {price_text} ₽/мес.",
         reply_markup=confirm_client_kb(),
     )
-    await callback.answer()
 
 @router.callback_query(F.data == "client_confirm_create")
 async def add_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
     if not await is_admin(callback.from_user.id, router): return
     data = await state.get_data()
     try:
-        c = await DB.create_client(data["name"], data["threads"], data.get("telegram"), data.get("publish_mode", "client"))
+        c = await DB.create_client(
+            data["name"], data["threads"], data.get("telegram"),
+            data.get("publish_mode", "client"), data.get("services"), data.get("service_price")
+        )
     except ValueError as exc:
         await callback.message.answer(str(exc), reply_markup=admin_menu()); await state.clear(); await callback.answer(); return
     await ensure_topic(bot, DB, SETTINGS.work_group_id, c["id"])
     c = await DB.get_client(c["id"])
     await DB.log_event(c["id"], "client_created")
     await state.clear()
+    me = await bot.get_me()
+    invite = f"https://t.me/{me.username}?start=invite_{c['invite_code']}"
     if c["publish_mode"] == "team":
-        extra = "\n\nПроект ведём мы — подключать клиента к боту необязательно."
+        extra = (
+            "\n\nПроект ведём мы. Клиенту всё равно понадобится открыть бота один раз "
+            "для подписания договора и согласия на обработку персональных данных."
+            f"\n\nСсылка для документов:\n{invite}"
+        )
     else:
-        me = await bot.get_me()
-        invite = f"https://t.me/{me.username}?start=invite_{c['invite_code']}"
         extra = f"\n\nСсылка подключения:\n{invite}"
     await callback.message.answer(card_text(c) + extra, reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id))
     await callback.message.answer("Не забудьте зафиксировать стартовые показатели клиента через кнопку «🚀 Старт проекта».")
@@ -335,3 +381,239 @@ async def ws8(m: Message,s: FSMContext): await s.update_data(best_post=None if m
 @router.message(WeeklyStatsFlow.manager_comment)
 async def ws9(m: Message,s: FSMContext):
     d=await s.get_data(); d["manager_comment"]=None if m.text=="-" else m.text; today=date.today(); start=today-timedelta(days=today.weekday()); end=start+timedelta(days=6); await DB.save_weekly_stats(d["client_id"],start.isoformat(),end.isoformat(),d); await topic_log(m.bot,DB,SETTINGS.work_group_id,d["client_id"],"📈 Администратор внёс недельную статистику."); await s.clear(); await m.answer("Статистика сохранена ✅",reply_markup=admin_menu())
+
+
+
+
+@router.callback_query(F.data.startswith("client_terms:"))
+async def client_terms_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if not c:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+    price_text = f"{c['service_price']:,}".replace(",", " ") + " ₽/мес." if c["service_price"] else "—"
+    await state.clear()
+    await state.update_data(client_id=cid)
+    await state.set_state(ClientTermsFlow.services)
+    await callback.message.answer(
+        "<b>Услуги и стоимость</b>\n\n"
+        f"Сейчас:\nУслуги: {c['services'] or '—'}\nСтоимость: {price_text}\n\n"
+        "Введите новый список услуг:"
+    )
+    await callback.answer()
+
+
+@router.message(ClientTermsFlow.services)
+async def client_terms_services(message: Message, state: FSMContext):
+    services = (message.text or "").strip()
+    if len(services) < 3:
+        await message.answer("Опишите услуги чуть подробнее.")
+        return
+    await state.update_data(services=services)
+    await state.set_state(ClientTermsFlow.service_price)
+    await message.answer("Введите новую стоимость в месяц, например: 30000")
+
+
+@router.message(ClientTermsFlow.service_price)
+async def client_terms_price(message: Message, state: FSMContext):
+    raw = (message.text or "").strip().lower().replace(" ", "").replace("₽", "").replace("рублей", "").replace("руб.", "").replace("руб", "")
+    if not raw.isdigit():
+        await message.answer("Введите стоимость числом, например: 30000")
+        return
+    price = int(raw)
+    if price <= 0:
+        await message.answer("Стоимость должна быть больше 0.")
+        return
+
+    data = await state.get_data()
+    cid = int(data["client_id"])
+    await DB.update_client_terms(cid, data["services"], price)
+    await DB.log_event(cid, "client_terms_updated", {"services": data["services"], "service_price": price})
+    c = await DB.get_client(cid)
+
+    # If client is already connected, immediately invite them to sign the new version.
+    if c["telegram_id"]:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📑 Открыть документы", callback_data="docs_begin")
+        ]])
+        client_price_text = f"{c['service_price']:,}".replace(",", " ")
+        try:
+            await message.bot.send_message(
+                c["telegram_id"],
+                "📑 <b>Обновлены условия проекта</b>\n\n"
+                f"Услуги: {c['services']}\n"
+                f"Стоимость: {client_price_text} ₽/мес.\n\n"
+                "Сформирован новый договор. Ознакомьтесь и подтвердите документы.",
+                reply_markup=kb,
+            )
+            await topic_log(
+                message.bot, DB, SETTINGS.work_group_id, cid,
+                "📑 Клиенту отправлено уведомление о новом договоре после изменения услуг/стоимости."
+            )
+        except Exception:
+            import logging
+            logging.exception("Не удалось отправить клиенту уведомление о новых документах")
+
+    await state.clear()
+    await message.answer(
+        "Услуги и стоимость обновлены ✅\n\n" + card_text(c),
+        reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id),
+    )
+
+
+@router.callback_query(F.data.startswith("client_contract_preview:"))
+async def client_contract_preview(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if not c:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+    if not c["services"] or not c["service_price"]:
+        await callback.answer("Сначала заполните услуги и стоимость", show_alert=True)
+        return
+
+    signer = c["legal_name"] or c["name"]
+    path = temp_pdf(f"contract_preview_{cid}_")
+    try:
+        generate_contract_pdf(c, signer, SETTINGS, path, draft=True)
+        await callback.message.answer_document(
+            __import__("aiogram.types", fromlist=["FSInputFile"]).FSInputFile(path),
+            caption="📄 Предварительный просмотр договора"
+        )
+    finally:
+        try:
+            __import__("os").remove(path)
+        except OSError:
+            pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("client_docs_send:"))
+async def client_docs_send(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if not c:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+    if not c["telegram_id"]:
+        await callback.answer("Клиент ещё не подключён к боту", show_alert=True)
+        return
+    if not c["services"] or not c["service_price"]:
+        await callback.answer("Сначала заполните услуги и стоимость", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📑 Открыть документы", callback_data="docs_begin")
+    ]])
+    await callback.bot.send_message(
+        c["telegram_id"],
+        "📑 Для вас подготовлены документы по проекту. "
+        "Откройте их, проверьте условия и подтвердите.",
+        reply_markup=kb,
+    )
+    await topic_log(
+        callback.bot, DB, SETTINGS.work_group_id, cid,
+        "📨 Документы вручную направлены клиенту на подтверждение."
+    )
+    await callback.answer("Отправлено ✅")
+
+@router.callback_query(F.data.startswith("client_docs:"))
+async def client_docs_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if not c:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+
+    consent = await DB.get_client_consent(cid)
+    contract_ok = bool(consent and consent["contract_accepted_at"])
+    pd_ok = bool(consent and consent["pd_consent_at"])
+
+    status = (
+        f"Услуги: {c['services'] or '—'}\n"
+        f"Стоимость: {f'{c['service_price']:,}'.replace(',', ' ') + ' ₽/мес.' if c['service_price'] else '—'}\n"
+        f"ФИО клиента: {c['legal_name'] or 'клиент ещё не подтвердил'}\n\n"
+        f"Договор: {'✅ подписан' if contract_ok else '⏳ не подписан'}\n"
+        f"Согласие ПД: {'✅ получено' if pd_ok else '⏳ не получено'}"
+    )
+
+    buttons = [
+        [InlineKeyboardButton(text="👁 Просмотреть договор", callback_data=f"client_contract_preview:{cid}")],
+        [InlineKeyboardButton(text="📨 Отправить на подписание", callback_data=f"client_docs_send:{cid}")],
+        [InlineKeyboardButton(text="📄 Загрузить договор вручную", callback_data=f"client_docs_contract:{cid}")],
+        [InlineKeyboardButton(text="🔐 Загрузить политику вручную", callback_data=f"client_docs_policy:{cid}")],
+    ]
+    await callback.message.answer(
+        f"<b>Документы клиента</b>\n\n{status}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("client_docs_contract:"))
+async def client_docs_contract(callback: CallbackQuery, state: FSMContext):
+    cid = int(callback.data.split(":")[1])
+    await state.clear()
+    await state.update_data(client_id=cid)
+    await state.set_state(ClientDocsFlow.contract)
+    await callback.message.answer("Пришлите договор PDF-файлом:")
+    await callback.answer()
+
+
+@router.message(ClientDocsFlow.contract, F.document)
+async def client_docs_contract_save(message: Message, state: FSMContext):
+    doc = message.document
+    if not doc or (doc.mime_type and doc.mime_type != "application/pdf"):
+        await message.answer("Нужен PDF-файл договора.")
+        return
+    data = await state.get_data()
+    cid = data["client_id"]
+    await DB.set_client_documents(cid, contract_file_id=doc.file_id)
+    await DB.log_event(cid, "contract_uploaded")
+    await topic_log(message.bot, DB, SETTINGS.work_group_id, cid, "📄 Договор загружен/обновлён. Требуется подтверждение клиента.")
+    await state.clear()
+    await message.answer("Договор сохранён ✅\nПредыдущее подтверждение клиента, если было, сброшено.", reply_markup=admin_menu())
+
+
+@router.message(ClientDocsFlow.contract)
+async def client_docs_contract_bad(message: Message):
+    await message.answer("Пришлите договор именно PDF-файлом.")
+
+
+@router.callback_query(F.data.startswith("client_docs_policy:"))
+async def client_docs_policy(callback: CallbackQuery, state: FSMContext):
+    cid = int(callback.data.split(":")[1])
+    await state.clear()
+    await state.update_data(client_id=cid)
+    await state.set_state(ClientDocsFlow.policy)
+    await callback.message.answer("Пришлите политику обработки персональных данных PDF-файлом:")
+    await callback.answer()
+
+
+@router.message(ClientDocsFlow.policy, F.document)
+async def client_docs_policy_save(message: Message, state: FSMContext):
+    doc = message.document
+    if not doc or (doc.mime_type and doc.mime_type != "application/pdf"):
+        await message.answer("Нужен PDF-файл политики.")
+        return
+    data = await state.get_data()
+    cid = data["client_id"]
+    await DB.set_client_documents(cid, policy_file_id=doc.file_id)
+    await DB.log_event(cid, "policy_uploaded")
+    await topic_log(message.bot, DB, SETTINGS.work_group_id, cid, "🔐 Политика загружена/обновлена. Требуется подтверждение клиента.")
+    await state.clear()
+    await message.answer("Политика сохранена ✅\nПредыдущее подтверждение клиента, если было, сброшено.", reply_markup=admin_menu())
+
+
+@router.message(ClientDocsFlow.policy)
+async def client_docs_policy_bad(message: Message):
+    await message.answer("Пришлите политику именно PDF-файлом.")
