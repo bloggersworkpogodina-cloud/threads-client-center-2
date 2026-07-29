@@ -23,17 +23,18 @@ POLICY_VERSION = "2026-07-28-v1"
 
 
 def _font_path() -> str:
+    bundled = Path(__file__).resolve().parent / "fonts" / "DejaVuSans.ttf"
     candidates = [
+        str(bundled),
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     ]
     for candidate in candidates:
         if Path(candidate).exists():
             return candidate
-    raise RuntimeError(
-        "Не найден шрифт с кириллицей. Для Railway нужен fonts-dejavu-core."
-    )
+    raise RuntimeError("Не найден шрифт для PDF.")
 
 
 def _register_font():
