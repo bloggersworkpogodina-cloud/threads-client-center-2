@@ -53,22 +53,28 @@ async def _send_current_documents(message: Message, client):
     if not signer:
         raise RuntimeError("legal_name is required")
 
+    chat_id = client["telegram_id"]
+    if not chat_id:
+        raise RuntimeError("Клиент ещё не подключён к боту")
+
     expected_contract_version = contract_version(client, signer, SETTINGS)
     expected_policy_version = policy_version(SETTINGS)
 
-    # Reuse Telegram files if terms/version have not changed.
+    # Reuse Telegram files if the current versions are already stored.
     if (
         client["contract_file_id"] and client["policy_file_id"]
         and client["contract_version"] == expected_contract_version
         and client["policy_version"] == expected_policy_version
     ):
-        await message.answer_document(
+        await message.bot.send_document(
+            chat_id,
             client["contract_file_id"],
-            caption="📄 <b>Договор оказания услуг</b>"
+            caption="📄 <b>Договор оказания услуг</b>",
         )
-        await message.answer_document(
+        await message.bot.send_document(
+            chat_id,
             client["policy_file_id"],
-            caption="🔐 <b>Политика обработки персональных данных</b>"
+            caption="🔐 <b>Политика обработки персональных данных</b>",
         )
         return
 
@@ -78,13 +84,17 @@ async def _send_current_documents(message: Message, client):
         generate_contract_pdf(client, signer, SETTINGS, contract_path, draft=False)
         generate_policy_pdf(SETTINGS, policy_path)
 
-        sent_contract = await message.answer_document(
-            document=__import__("aiogram.types", fromlist=["FSInputFile"]).FSInputFile(contract_path),
-            caption="📄 <b>Договор оказания услуг</b>\nПроверьте услуги, стоимость и ваши ФИО."
+        FSInputFile = __import__("aiogram.types", fromlist=["FSInputFile"]).FSInputFile
+
+        sent_contract = await message.bot.send_document(
+            chat_id=chat_id,
+            document=FSInputFile(contract_path),
+            caption="📄 <b>Договор оказания услуг</b>\nПроверьте услуги, стоимость, даты и ваши ФИО.",
         )
-        sent_policy = await message.answer_document(
-            document=__import__("aiogram.types", fromlist=["FSInputFile"]).FSInputFile(policy_path),
-            caption="🔐 <b>Политика обработки персональных данных</b>"
+        sent_policy = await message.bot.send_document(
+            chat_id=chat_id,
+            document=FSInputFile(policy_path),
+            caption="🔐 <b>Политика обработки персональных данных</b>",
         )
 
         await DB.set_client_documents(
@@ -172,8 +182,21 @@ async def docs_begin(callback: CallbackQuery, state: FSMContext):
     if not c:
         await callback.answer("Кабинет не найден", show_alert=True)
         return
-    await _begin_documents(callback.message, state, c)
-    await callback.answer()
+
+    # Telegram сразу получает ответ на нажатие кнопки, поэтому кнопка
+    # не выглядит "зависшей", пока генерируется PDF.
+    await callback.answer("Открываю документы…")
+
+    try:
+        await _begin_documents(callback.message, state, c)
+    except Exception:
+        import logging
+        logging.exception("Не удалось открыть/сформировать документы клиента %s", c["id"])
+        await callback.bot.send_message(
+            callback.from_user.id,
+            "Не удалось открыть документы из-за технической ошибки. "
+            "Менеджер уже может увидеть ошибку в логах. Попробуйте ещё раз чуть позже.",
+        )
 
 
 @router.message(ConsentFlow.signer_name)
@@ -307,8 +330,8 @@ async def plan(message: Message):
 async def manager(message: Message,state:FSMContext):
     c=await DB.get_client_by_tg(message.from_user.id)
     if not c: await message.answer("Личный кабинет не найден."); return
-    if not await _documents_gate(message, c): return
-    await state.set_state(ManagerMessage.text); await message.answer("Напишите сообщение менеджеру:")
+    await state.set_state(ManagerMessage.text)
+    await message.answer("Напишите сообщение менеджеру:")
 
 @router.message(ManagerMessage.text)
 async def manager_send(message:Message,state:FSMContext):
@@ -397,9 +420,8 @@ async def client_direct_message_bridge(message: Message, state: FSMContext):
     client = await DB.get_client_by_tg(message.from_user.id)
     if not client:
         return
-    if not await DB.documents_fully_accepted(client["id"]):
-        return
 
+    # Связь с менеджером доступна независимо от статуса документов.
     # Menu buttons are already handled by the dedicated handlers above.
     if message.text in {
         "/start",
