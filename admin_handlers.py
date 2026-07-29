@@ -9,6 +9,7 @@ from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow, BaselineFlow
 from keyboards import admin_menu, client_card_kb, confirm_client_kb, skip_photo_kb
 from topics import ensure_topic, topic_log
 from documents import generate_contract_pdf, generate_policy_pdf, temp_pdf
+from billing import period, fmt
 from posts import send_today_posts
 
 router = Router()
@@ -32,10 +33,17 @@ def card_text(c):
     publish_mode = c["publish_mode"] if "publish_mode" in c.keys() else "client"
     publish_label = "👩‍💻 мы публикуем" if publish_mode == "team" else "👤 клиент публикует сам"
     price_text = f"{c['service_price']:,}".replace(",", " ") + " ₽/мес." if c["service_price"] else "—"
+    if c["billing_start"]:
+        ps, pe, _ = period(c["billing_start"], 0)
+        ns, ne, ndue = period(c["billing_start"], 1)
+        billing_text = f"{fmt(ps)}–{fmt(pe)}; следующий {fmt(ns)}–{fmt(ne)}; оплатить до {fmt(ndue)}"
+    else:
+        billing_text = "—"
     return (f"<b>{c['name']}</b>\n\nThreads: @{c['threads_username_normalized']}\nTelegram: @{c['telegram_username'] or '—'}\n"
             f"Публикация: {publish_label}\n"
             f"Услуги: {c['services'] or '—'}\n"
             f"Стоимость: {price_text}\n"
+            f"Расчётный период: {billing_text}\n"
             f"Кабинет: {'подключён' if c['telegram_id'] else 'не подключён'}\n"
             f"Контент-план: {'подключён' if c['sheet_url'] else 'не подключён'}\n"
             f"Документы: {'✅ загружены' if c['contract_file_id'] and c['policy_file_id'] else '⏳ не загружены'}\nТема: {'создана' if c['topic_id'] else 'не создана'}\nСтатус: {'активен' if c['is_active'] else 'архив'}")
@@ -55,20 +63,21 @@ async def add_name(message: Message, state: FSMContext):
 async def add_threads(message: Message, state: FSMContext):
     value = (message.text or "").strip()
     if not value or value == "-":
-        await message.answer("Threads username обязателен."); return
-    await state.update_data(threads=value); await state.set_state(AddClient.telegram)
-    await message.answer("Введите Telegram username: username, @username, ссылка t.me или -")
+        await message.answer("Threads username обязателен.")
+        return
 
-@router.message(AddClient.telegram)
-async def add_telegram(message: Message, state: FSMContext):
-    telegram = (message.text or "").strip()
-    await state.update_data(telegram=telegram)
+    await state.update_data(threads=value)
     await state.set_state(AddClient.publish_mode)
+
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="👤 Клиент сам", callback_data="add_publish_mode:client"),
-        InlineKeyboardButton(text="👩‍💻 Мы публикуем", callback_data="add_publish_mode:team"),
+        InlineKeyboardButton(text="👤 Клиент публикует сам", callback_data="add_publish_mode:client"),
+        InlineKeyboardButton(text="👩‍💻 Ведём мы", callback_data="add_publish_mode:team"),
     ]])
-    await message.answer("Кто публикует Threads для этого проекта?", reply_markup=kb)
+    await message.answer(
+        "Кто ведёт публикацию в Threads для этого проекта?",
+        reply_markup=kb,
+    )
+
 
 @router.callback_query(AddClient.publish_mode, F.data.startswith("add_publish_mode:"))
 async def add_publish_mode(callback: CallbackQuery, state: FSMContext):
@@ -76,14 +85,38 @@ async def add_publish_mode(callback: CallbackQuery, state: FSMContext):
     if mode not in {"client", "team"}:
         await callback.answer("Неверный вариант", show_alert=True)
         return
+
     await state.update_data(publish_mode=mode)
+
+    if mode == "client":
+        await state.set_state(AddClient.telegram)
+        await callback.message.answer(
+            "Введите Telegram username клиента: username, @username, ссылка t.me или -"
+        )
+    else:
+        # Для проекта, который ведём мы, Telegram клиента не обязателен.
+        await state.update_data(telegram="-")
+        await state.set_state(AddClient.services)
+        await callback.message.answer(
+            "👩‍💻 Проект ведём мы.\n\n"
+            "Какие услуги оказываем клиенту?\n\n"
+            "Напишите свободным текстом, например:\n"
+            "Создание 4 веток ежедневно, кроме субботы; публикация контента; аналитика"
+        )
+
+    await callback.answer()
+
+
+@router.message(AddClient.telegram)
+async def add_telegram(message: Message, state: FSMContext):
+    telegram = (message.text or "").strip()
+    await state.update_data(telegram=telegram)
     await state.set_state(AddClient.services)
-    await callback.message.answer(
+    await message.answer(
         "Какие услуги оказываем клиенту?\n\n"
         "Напишите свободным текстом, например:\n"
-        "Стратегия продвижения, 4 ветки ежедневно, публикация контента, аналитика"
+        "Создание 4 веток ежедневно, кроме субботы; аналитика"
     )
-    await callback.answer()
 
 
 @router.message(AddClient.services)
@@ -92,9 +125,13 @@ async def add_services(message: Message, state: FSMContext):
     if len(services) < 3:
         await message.answer("Опишите услуги чуть подробнее.")
         return
+
     await state.update_data(services=services)
     await state.set_state(AddClient.service_price)
-    await message.answer("Стоимость услуг в месяц?\n\nВведите сумму, например: 30000")
+    await message.answer(
+        "💳 Стоимость услуг за расчётный период?\n\n"
+        "Введите сумму, например: 30000"
+    )
 
 
 @router.message(AddClient.service_price)
@@ -107,22 +144,34 @@ async def add_service_price(message: Message, state: FSMContext):
     if price <= 0:
         await message.answer("Стоимость должна быть больше 0.")
         return
-
     await state.update_data(service_price=price)
+    await state.set_state(AddClient.billing_start)
+    await message.answer("📅 Когда начинается первый расчётный период клиента?\n\nВведите дату ДД.ММ.ГГГГ\nНапример: 15.08.2026")
+
+
+@router.message(AddClient.billing_start)
+async def add_billing_start(message: Message, state: FSMContext):
+    try:
+        dt = datetime.strptime((message.text or "").strip(), "%d.%m.%Y").date()
+    except ValueError:
+        await message.answer("Введите дату в формате ДД.ММ.ГГГГ, например: 15.08.2026")
+        return
+    iso=dt.isoformat()
+    await state.update_data(billing_start=iso)
     await state.set_state(AddClient.confirm)
-    data = await state.get_data()
-    label = "👩‍💻 Мы публикуем" if data.get("publish_mode") == "team" else "👤 Клиент сам"
-    price_text = f"{price:,}".replace(",", " ")
+    data=await state.get_data()
+    label="👩‍💻 Мы публикуем" if data.get("publish_mode")=="team" else "👤 Клиент сам"
+    ps,pe,due=period(iso,0); ns,ne,ndue=period(iso,1)
+    price_text=f"{data['service_price']:,}".replace(",", " ")
     await message.answer(
-        f"Проверьте данные:\n\n"
-        f"Имя: {data['name']}\n"
-        f"Threads: @{DB.normalize_threads(data['threads'])}\n"
-        f"Telegram: @{DB.normalize_telegram(data.get('telegram')) or '—'}\n"
-        f"Публикация: {label}\n"
-        f"Услуги: {data['services']}\n"
-        f"Стоимость: {price_text} ₽/мес.",
-        reply_markup=confirm_client_kb(),
+        f"Проверьте данные:\n\nИмя: {data['name']}\nThreads: @{DB.normalize_threads(data['threads'])}\n"
+        f"Telegram: @{DB.normalize_telegram(data.get('telegram')) or '—'}\nПубликация: {label}\n"
+        f"Услуги: {data['services']}\nСтоимость: {price_text} ₽/мес.\n"
+        f"Первый период: {fmt(ps)}–{fmt(pe)}\nОплата до: {fmt(due)}\n"
+        f"Следующий период: {fmt(ns)}–{fmt(ne)}\nСледующая оплата до: {fmt(ndue)}",
+        reply_markup=confirm_client_kb()
     )
+
 
 @router.callback_query(F.data == "client_confirm_create")
 async def add_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
@@ -131,7 +180,7 @@ async def add_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
     try:
         c = await DB.create_client(
             data["name"], data["threads"], data.get("telegram"),
-            data.get("publish_mode", "client"), data.get("services"), data.get("service_price")
+            data.get("publish_mode", "client"), data.get("services"), data.get("service_price"), data.get("billing_start")
         )
     except ValueError as exc:
         await callback.message.answer(str(exc), reply_markup=admin_menu()); await state.clear(); await callback.answer(); return
@@ -419,49 +468,34 @@ async def client_terms_services(message: Message, state: FSMContext):
 
 @router.message(ClientTermsFlow.service_price)
 async def client_terms_price(message: Message, state: FSMContext):
-    raw = (message.text or "").strip().lower().replace(" ", "").replace("₽", "").replace("рублей", "").replace("руб.", "").replace("руб", "")
-    if not raw.isdigit():
+    raw=(message.text or "").strip().lower().replace(" ","").replace("₽","").replace("рублей","").replace("руб.","").replace("руб","")
+    if not raw.isdigit() or int(raw)<=0:
         await message.answer("Введите стоимость числом, например: 30000")
         return
-    price = int(raw)
-    if price <= 0:
-        await message.answer("Стоимость должна быть больше 0.")
+    await state.update_data(service_price=int(raw))
+    await state.set_state(ClientTermsFlow.billing_start)
+    await message.answer("📅 Введите дату начала первого расчётного периода клиента.\nФормат: ДД.ММ.ГГГГ\nНапример: 15.08.2026")
+
+
+@router.message(ClientTermsFlow.billing_start)
+async def client_terms_billing(message: Message, state: FSMContext):
+    try:
+        dt=datetime.strptime((message.text or "").strip(), "%d.%m.%Y").date()
+    except ValueError:
+        await message.answer("Введите дату в формате ДД.ММ.ГГГГ, например: 15.08.2026")
         return
-
-    data = await state.get_data()
-    cid = int(data["client_id"])
-    await DB.update_client_terms(cid, data["services"], price)
-    await DB.log_event(cid, "client_terms_updated", {"services": data["services"], "service_price": price})
-    c = await DB.get_client(cid)
-
-    # If client is already connected, immediately invite them to sign the new version.
+    data=await state.get_data(); cid=int(data["client_id"]); iso=dt.isoformat(); price=int(data["service_price"])
+    await DB.update_client_terms(cid,data["services"],price,iso)
+    await DB.log_event(cid,"client_terms_updated",{"services":data["services"],"service_price":price,"billing_start":iso})
+    c=await DB.get_client(cid)
     if c["telegram_id"]:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="📑 Открыть документы", callback_data="docs_begin")
-        ]])
-        client_price_text = f"{c['service_price']:,}".replace(",", " ")
+        kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📑 Открыть документы",callback_data="docs_begin")]])
         try:
-            await message.bot.send_message(
-                c["telegram_id"],
-                "📑 <b>Обновлены условия проекта</b>\n\n"
-                f"Услуги: {c['services']}\n"
-                f"Стоимость: {client_price_text} ₽/мес.\n\n"
-                "Сформирован новый договор. Ознакомьтесь и подтвердите документы.",
-                reply_markup=kb,
-            )
-            await topic_log(
-                message.bot, DB, SETTINGS.work_group_id, cid,
-                "📑 Клиенту отправлено уведомление о новом договоре после изменения услуг/стоимости."
-            )
+            await message.bot.send_message(c["telegram_id"],"📑 <b>Обновлены условия проекта</b>\n\nСформирован новый договор. Ознакомьтесь и подтвердите документы.",reply_markup=kb)
         except Exception:
-            import logging
-            logging.exception("Не удалось отправить клиенту уведомление о новых документах")
-
+            import logging; logging.exception("Не удалось отправить документы")
     await state.clear()
-    await message.answer(
-        "Услуги и стоимость обновлены ✅\n\n" + card_text(c),
-        reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id),
-    )
+    await message.answer("Условия клиента обновлены ✅\n\n"+card_text(c),reply_markup=client_card_kb(c["id"],c["topic_id"],SETTINGS.work_group_id))
 
 
 @router.callback_query(F.data.startswith("client_contract_preview:"))
@@ -473,7 +507,7 @@ async def client_contract_preview(callback: CallbackQuery):
     if not c:
         await callback.answer("Клиент не найден", show_alert=True)
         return
-    if not c["services"] or not c["service_price"]:
+    if not c["services"] or not c["service_price"] or not c["billing_start"]:
         await callback.answer("Сначала заполните услуги и стоимость", show_alert=True)
         return
 
@@ -505,7 +539,7 @@ async def client_docs_send(callback: CallbackQuery):
     if not c["telegram_id"]:
         await callback.answer("Клиент ещё не подключён к боту", show_alert=True)
         return
-    if not c["services"] or not c["service_price"]:
+    if not c["services"] or not c["service_price"] or not c["billing_start"]:
         await callback.answer("Сначала заполните услуги и стоимость", show_alert=True)
         return
 

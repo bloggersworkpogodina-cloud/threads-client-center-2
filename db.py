@@ -53,6 +53,7 @@ class Database:
             policy_file_id TEXT,
             services TEXT,
             service_price INTEGER,
+            billing_start TEXT,
             legal_name TEXT,
             contract_version TEXT,
             policy_version TEXT,
@@ -167,6 +168,8 @@ class Database:
                 await conn.execute("ALTER TABLE clients ADD COLUMN services TEXT")
             if "service_price" not in client_columns:
                 await conn.execute("ALTER TABLE clients ADD COLUMN service_price INTEGER")
+            if "billing_start" not in client_columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN billing_start TEXT")
             if "legal_name" not in client_columns:
                 await conn.execute("ALTER TABLE clients ADD COLUMN legal_name TEXT")
             if "contract_version" not in client_columns:
@@ -226,7 +229,7 @@ class Database:
         value = value.strip().lstrip("@").split("?")[0].strip("/")
         return value or None
 
-    async def create_client(self, name: str, threads_username: str, telegram_username: str | None, publish_mode: str = "client", services: str | None = None, service_price: int | None = None) -> aiosqlite.Row:
+    async def create_client(self, name: str, threads_username: str, telegram_username: str | None, publish_mode: str = "client", services: str | None = None, service_price: int | None = None, billing_start: str | None = None) -> aiosqlite.Row:
         threads = self.normalize_threads(threads_username)
         telegram = self.normalize_telegram(telegram_username)
         invite_code = secrets.token_urlsafe(10)
@@ -236,10 +239,10 @@ class Database:
             try:
                 cur = await conn.execute(
                     """
-                    INSERT INTO clients(name, threads_username_normalized, telegram_username, invite_code, publish_mode, services, service_price, is_active, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    INSERT INTO clients(name, threads_username_normalized, telegram_username, invite_code, publish_mode, services, service_price, billing_start, is_active, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
-                    (name.strip(), threads, telegram, invite_code, publish_mode, (services or "").strip() or None, service_price, now, now),
+                    (name.strip(), threads, telegram, invite_code, publish_mode, (services or "").strip() or None, service_price, billing_start, now, now),
                 )
                 await conn.commit()
             except aiosqlite.IntegrityError as exc:
@@ -248,17 +251,17 @@ class Database:
             return row
 
 
-    async def update_client_terms(self, client_id: int, services: str, service_price: int) -> None:
+    async def update_client_terms(self, client_id: int, services: str, service_price: int, billing_start: str) -> None:
         now = datetime.utcnow().isoformat()
         async with self.connect() as conn:
             await conn.execute(
                 """UPDATE clients
-                   SET services = ?, service_price = ?,
+                   SET services = ?, service_price = ?, billing_start = ?,
                        contract_file_id = NULL, policy_file_id = NULL,
                        contract_version = NULL, policy_version = NULL,
                        updated_at = ?
                    WHERE id = ?""",
-                ((services or "").strip() or None, int(service_price), now, client_id),
+                ((services or "").strip() or None, int(service_price), billing_start, now, client_id),
             )
             await conn.execute("DELETE FROM client_consents WHERE client_id = ?", (client_id,))
             await conn.commit()

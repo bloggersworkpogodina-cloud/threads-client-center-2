@@ -108,9 +108,9 @@ async def _begin_documents(message: Message, state: FSMContext, client):
         await _show_client_cabinet(message)
         return
 
-    if not client["services"] or not client["service_price"]:
+    if not client["services"] or not client["service_price"] or not client["billing_start"]:
         await message.answer(
-            "Менеджер ещё не заполнил услуги и стоимость проекта. "
+            "Менеджер ещё не заполнил услуги, стоимость и дату расчётного периода проекта. "
             "Документы будут доступны после заполнения карточки."
         )
         return
