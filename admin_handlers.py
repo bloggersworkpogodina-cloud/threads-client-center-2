@@ -192,12 +192,17 @@ async def add_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
     invite = f"https://t.me/{me.username}?start=invite_{c['invite_code']}"
     if c["publish_mode"] == "team":
         extra = (
-            "\n\nПроект ведём мы. Клиенту всё равно понадобится открыть бота один раз "
-            "для подписания договора и согласия на обработку персональных данных."
-            f"\n\nСсылка для документов:\n{invite}"
+            "\n\nПроект ведём мы.\n"
+            "Передайте клиенту эту ссылку: через бот он подпишет договор "
+            "и затем сможет получать аналитику по проекту."
+            f"\n\nСсылка клиента:\n{invite}"
         )
     else:
-        extra = f"\n\nСсылка подключения:\n{invite}"
+        extra = (
+            "\n\nПередайте клиенту ссылку для подключения, подписания договора "
+            "и получения материалов/аналитики:"
+            f"\n\nСсылка клиента:\n{invite}"
+        )
     await callback.message.answer(card_text(c) + extra, reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id))
     await callback.message.answer("Не забудьте зафиксировать стартовые показатели клиента через кнопку «🚀 Старт проекта».")
     await callback.answer()
@@ -304,6 +309,89 @@ async def plan_save(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("client_archive:"))
 async def archive(callback: CallbackQuery):
     cid = int(callback.data.split(":")[1]); await DB.archive_client(cid); await DB.log_event(cid, "client_archived"); await callback.message.answer("Клиент перемещён в архив.", reply_markup=admin_menu()); await callback.answer()
+
+
+
+async def _client_analytics_text(client_id: int) -> str:
+    a = await DB.analytics(client_id)
+    baseline = await DB.get_baseline(client_id)
+    latest = await DB.get_latest_weekly_stats(client_id)
+
+    text = (
+        "<b>📊 Результаты продвижения</b>\n\n"
+        f"Отправлено веток: {a['sent']}\n"
+        f"Опубликовано: {a['published']}\n"
+        f"Дисциплина: {a['discipline']}%\n"
+        f"Отклики: {a['responses']}\n"
+        f"Заявки: {a['leads']}"
+    )
+
+    if baseline:
+        text += (
+            "\n\n<b>Старт проекта</b>\n"
+            f"Threads: {baseline['threads_followers']}\n"
+            f"Telegram: {baseline['telegram_followers']}\n"
+            f"Заявки/неделя: {baseline['weekly_leads']}"
+        )
+
+    if latest:
+        text += (
+            "\n\n<b>Последняя неделя</b>\n"
+            f"Просмотры: {latest['views']}\n"
+            f"Threads: {latest['threads_followers']}\n"
+            f"Telegram: {latest['telegram_followers']}\n"
+            f"Заявки: {latest['applications']}"
+        )
+        if baseline:
+            text += (
+                "\n\n<b>Рост со старта</b>\n"
+                f"Threads: {latest['threads_followers'] - baseline['threads_followers']:+d}\n"
+                f"Telegram: {latest['telegram_followers'] - baseline['telegram_followers']:+d}\n"
+                f"Заявки/неделя: {latest['applications'] - baseline['weekly_leads']:+d}"
+            )
+
+    return text
+
+
+@router.callback_query(F.data.startswith("client_send_analytics:"))
+async def client_send_analytics(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if not c:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+
+    if not c["telegram_id"]:
+        me = await callback.bot.get_me()
+        invite = f"https://t.me/{me.username}?start=invite_{c['invite_code']}"
+        await callback.message.answer(
+            "Клиент ещё не подключён к боту.\n\n"
+            "Передайте ему ссылку — после подключения он сможет подписать договор "
+            "и получать аналитику:\n"
+            f"{invite}"
+        )
+        await callback.answer()
+        return
+
+    if not await DB.documents_fully_accepted(cid):
+        await callback.message.answer(
+            "Клиент подключён, но ещё не завершил оформление документов. "
+            "Аналитику отправим после подписания договора и согласия на обработку персональных данных."
+        )
+        await callback.answer()
+        return
+
+    text = await _client_analytics_text(cid)
+    await callback.bot.send_message(c["telegram_id"], text)
+    await DB.log_event(cid, "analytics_sent_to_client")
+    await topic_log(
+        callback.bot, DB, SETTINGS.work_group_id, cid,
+        "📊 Клиенту отправлена актуальная аналитика по проекту."
+    )
+    await callback.answer("Аналитика отправлена ✅")
 
 @router.callback_query(F.data.startswith("client_analytics:"))
 async def analytics(callback: CallbackQuery):
