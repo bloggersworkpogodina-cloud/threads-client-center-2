@@ -412,18 +412,46 @@ class Database:
             )).fetchall()
 
     async def previous_total_views(self, client_id: int) -> int:
+        totals = await self.previous_account_totals(client_id)
+        return totals["total_views"]
+
+    async def previous_account_totals(self, client_id: int) -> dict[str, int]:
         async with self.connect() as conn:
             latest = await (await conn.execute(
-                "SELECT total_views FROM weekly_stats WHERE client_id=? ORDER BY week_start DESC LIMIT 1",
+                """SELECT total_views, threads_followers, telegram_followers
+                   FROM weekly_stats
+                   WHERE client_id=?
+                   ORDER BY week_start DESC
+                   LIMIT 1""",
                 (client_id,),
             )).fetchone()
-            if latest and latest["total_views"]:
-                return int(latest["total_views"])
+
+            if latest:
+                return {
+                    "total_views": int(latest["total_views"] or 0),
+                    "threads_followers": int(latest["threads_followers"] or 0),
+                    "telegram_followers": int(latest["telegram_followers"] or 0),
+                }
+
             baseline = await (await conn.execute(
-                "SELECT total_views FROM client_baseline WHERE client_id=?",
+                """SELECT total_views, threads_followers, telegram_followers
+                   FROM client_baseline
+                   WHERE client_id=?""",
                 (client_id,),
             )).fetchone()
-            return int(baseline["total_views"]) if baseline else 0
+
+            if baseline:
+                return {
+                    "total_views": int(baseline["total_views"] or 0),
+                    "threads_followers": int(baseline["threads_followers"] or 0),
+                    "telegram_followers": int(baseline["telegram_followers"] or 0),
+                }
+
+            return {
+                "total_views": 0,
+                "threads_followers": 0,
+                "telegram_followers": 0,
+            }
 
     async def clients_missing_weekly_stats(self, week_start: str):
         async with self.connect() as conn:

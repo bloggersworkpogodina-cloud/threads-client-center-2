@@ -322,11 +322,19 @@ async def _client_analytics_text(client_id: int) -> str:
     text = "<b>📊 Статистика аккаунта</b>"
 
     if latest:
+        previous_row = history[1] if len(history) > 1 else baseline
+        previous_threads = int(previous_row["threads_followers"] or 0) if previous_row else 0
+        previous_telegram = int(previous_row["telegram_followers"] or 0) if previous_row else 0
+        threads_growth = int(latest["threads_followers"] or 0) - previous_threads
+        telegram_growth = int(latest["telegram_followers"] or 0) - previous_telegram
+
         text += (
             f"\n\n👀 Общие просмотры аккаунта: <b>{latest['total_views']:,}</b>"
             f"\n📈 За последнюю неделю: <b>+{latest['views']:,}</b>"
-            f"\n👥 Подписчиков Threads: <b>{latest['threads_followers']:,}</b>"
-            f"\n📣 Подписчиков Telegram: <b>{latest['telegram_followers']:,}</b>"
+            f"\n👥 Подписчиков Threads: <b>{latest['threads_followers']:,}</b> "
+            f"(<b>{threads_growth:+,}</b>)"
+            f"\n📣 Подписчиков Telegram: <b>{latest['telegram_followers']:,}</b> "
+            f"(<b>{telegram_growth:+,}</b>)"
             f"\n🎯 Заявок за неделю: <b>{latest['applications']:,}</b>"
         )
     elif baseline:
@@ -351,16 +359,22 @@ async def _client_analytics_text(client_id: int) -> str:
     if history:
         text += "\n\n<b>История роста</b>"
         ordered = list(reversed(history))
-        previous_delta = None
+        previous_threads = int(baseline["threads_followers"] or 0) if baseline else 0
+        previous_telegram = int(baseline["telegram_followers"] or 0) if baseline else 0
+
         for row in ordered:
+            threads_growth = int(row["threads_followers"] or 0) - previous_threads
+            telegram_growth = int(row["telegram_followers"] or 0) - previous_telegram
             text += (
                 f"\n\n{row['week_start']}–{row['week_end']}"
                 f"\nОбщие просмотры: {row['total_views']:,}"
-                f"\nЗа неделю: +{row['views']:,}"
-                f"\nThreads: {row['threads_followers']:,}"
+                f"\nПросмотры за неделю: +{row['views']:,}"
+                f"\nThreads: {row['threads_followers']:,} ({threads_growth:+,})"
+                f"\nTelegram: {row['telegram_followers']:,} ({telegram_growth:+,})"
                 f"\nЗаявки: {row['applications']:,}"
             )
-            previous_delta = row["views"]
+            previous_threads = int(row["threads_followers"] or 0)
+            previous_telegram = int(row["telegram_followers"] or 0)
 
         if len(history) >= 2:
             newest = history[0]["views"]
@@ -486,13 +500,18 @@ async def weekly_analytics_start(callback: CallbackQuery,state:FSMContext):
     if not await is_admin(callback.from_user.id, router): return
     cid=int(callback.data.split(":")[1])
     if not await DB.get_client(cid): await callback.answer("Клиент не найден",show_alert=True); return
-    previous_total = await DB.previous_total_views(cid)
+    previous = await DB.previous_account_totals(cid)
     await state.clear()
-    await state.update_data(client_id=cid, previous_total_views=previous_total)
+    await state.update_data(
+        client_id=cid,
+        previous_total_views=previous["total_views"],
+        previous_threads_followers=previous["threads_followers"],
+        previous_telegram_followers=previous["telegram_followers"],
+    )
     await state.set_state(WeeklyAnalyticsFlow.total_views)
     await callback.message.answer(
         "👀 Текущие общие просмотры аккаунта:\n\n"
-        f"Предыдущее значение: {previous_total:,}\n"
+        f"Предыдущее значение: {previous['total_views']:,}\n"
         "Введите новое число с верхней панели статистики Threads."
     )
     await callback.answer()
@@ -525,12 +544,66 @@ async def weekly_total_views(message: Message, state: FSMContext):
     )
 
 @router.message(WeeklyAnalyticsFlow.threads_followers)
-async def wa1(message: Message, state: FSMContext): await _analytics_num(message, state,"threads_followers",WeeklyAnalyticsFlow.telegram_followers,"Текущее количество подписчиков Telegram (если канала нет — 0):")
+async def wa1(message: Message, state: FSMContext):
+    try:
+        current = int((message.text or "").replace(" ", ""))
+    except ValueError:
+        await message.answer("Введите целое число, например: 1493")
+        return
+    if current < 0:
+        await message.answer("Число не может быть отрицательным.")
+        return
+
+    data = await state.get_data()
+    previous = int(data.get("previous_threads_followers", 0))
+    if previous and current < previous:
+        await message.answer(
+            f"Новое значение меньше предыдущего ({previous:,}). "
+            "Проверьте число и отправьте ещё раз."
+        )
+        return
+
+    growth = max(current - previous, 0)
+    await state.update_data(
+        threads_followers=current,
+        threads_followers_growth=growth,
+    )
+    await state.set_state(WeeklyAnalyticsFlow.telegram_followers)
+    await message.answer(
+        f"Прирост подписчиков Threads: +{growth:,} ✅\n\n"
+        "Текущее количество подписчиков Telegram (если канала нет — 0):"
+    )
+
+
 @router.message(WeeklyAnalyticsFlow.telegram_followers)
 async def wa2(message: Message, state: FSMContext):
-    await _analytics_num(
-        message, state, "telegram_followers",
-        WeeklyAnalyticsFlow.applications, "Заявки за неделю:"
+    try:
+        current = int((message.text or "").replace(" ", ""))
+    except ValueError:
+        await message.answer("Введите целое число, например: 401")
+        return
+    if current < 0:
+        await message.answer("Число не может быть отрицательным.")
+        return
+
+    data = await state.get_data()
+    previous = int(data.get("previous_telegram_followers", 0))
+    if previous and current < previous:
+        await message.answer(
+            f"Новое значение меньше предыдущего ({previous:,}). "
+            "Проверьте число и отправьте ещё раз."
+        )
+        return
+
+    growth = max(current - previous, 0)
+    await state.update_data(
+        telegram_followers=current,
+        telegram_followers_growth=growth,
+    )
+    await state.set_state(WeeklyAnalyticsFlow.applications)
+    await message.answer(
+        f"Прирост подписчиков Telegram: +{growth:,} ✅\n\n"
+        "Заявки за неделю:"
     )
 @router.message(WeeklyAnalyticsFlow.applications)
 async def wa4(message: Message, state: FSMContext): await _analytics_num(message, state,"applications",WeeklyAnalyticsFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
@@ -548,13 +621,18 @@ async def _finish_weekly(message:Message,state:FSMContext,telegram_file_id=None)
     today=date.today(); start=today-timedelta(days=today.weekday()); end=start+timedelta(days=6)
     await DB.save_weekly_analytics(d["client_id"],start.isoformat(),end.isoformat(),d); await DB.log_event(d["client_id"],"weekly_analytics_saved",{"week_start":start.isoformat()})
     await topic_log(message.bot,DB,SETTINGS.work_group_id,d["client_id"],"📈 Администратор внёс недельную статистику.")
-    growth = int(d.get("views", 0))
-    total = int(d.get("total_views", 0))
+    views_growth = int(d.get("views", 0))
+    total_views = int(d.get("total_views", 0))
+    threads_growth = int(d.get("threads_followers_growth", 0))
+    telegram_growth = int(d.get("telegram_followers_growth", 0))
     await state.clear()
     await message.answer(
         f"Статистика сохранена ✅\n\n"
-        f"Общие просмотры: {total:,}\n"
-        f"Рост за неделю: +{growth:,}",
+        f"👀 Общие просмотры: {total_views:,}\n"
+        f"📈 Просмотры за неделю: +{views_growth:,}\n"
+        f"👥 Threads: {d['threads_followers']:,} ({threads_growth:+,})\n"
+        f"📣 Telegram: {d['telegram_followers']:,} ({telegram_growth:+,})\n"
+        f"🎯 Заявки за неделю: {d['applications']:,}",
         reply_markup=admin_menu(),
     )
 @router.message(WeeklyAnalyticsFlow.telegram_screen,F.photo)
