@@ -108,6 +108,7 @@ class Database:
             client_id INTEGER NOT NULL REFERENCES clients(id),
             week_start TEXT NOT NULL,
             week_end TEXT NOT NULL,
+            total_views INTEGER NOT NULL DEFAULT 0,
             views INTEGER NOT NULL DEFAULT 0,
             likes INTEGER NOT NULL DEFAULT 0,
             replies INTEGER NOT NULL DEFAULT 0,
@@ -124,6 +125,7 @@ class Database:
 
         CREATE TABLE IF NOT EXISTS client_baseline (
             client_id INTEGER PRIMARY KEY REFERENCES clients(id),
+            total_views INTEGER NOT NULL DEFAULT 0,
             threads_followers INTEGER NOT NULL DEFAULT 0,
             telegram_followers INTEGER NOT NULL DEFAULT 0,
             weekly_leads INTEGER NOT NULL DEFAULT 0,
@@ -183,8 +185,13 @@ class Database:
             if "pd_consent_at" not in consent_columns:
                 await conn.execute("ALTER TABLE client_consents ADD COLUMN pd_consent_at TEXT")
 
+            baseline_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(client_baseline)")).fetchall()}
+            if "total_views" not in baseline_columns:
+                await conn.execute("ALTER TABLE client_baseline ADD COLUMN total_views INTEGER NOT NULL DEFAULT 0")
+
             weekly_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(weekly_stats)")).fetchall()}
             for column, definition in {
+                "total_views": "INTEGER NOT NULL DEFAULT 0",
                 "threads_followers": "INTEGER NOT NULL DEFAULT 0",
                 "telegram_followers": "INTEGER NOT NULL DEFAULT 0",
                 "applications": "INTEGER NOT NULL DEFAULT 0",
@@ -371,10 +378,10 @@ class Database:
         now = datetime.utcnow().isoformat()
         async with self.connect() as conn:
             await conn.execute(
-                """INSERT INTO client_baseline(client_id, threads_followers, telegram_followers, weekly_leads, overview_file_id, content_file_id, telegram_file_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(client_id) DO UPDATE SET threads_followers=excluded.threads_followers, telegram_followers=excluded.telegram_followers, weekly_leads=excluded.weekly_leads, overview_file_id=excluded.overview_file_id, content_file_id=excluded.content_file_id, telegram_file_id=excluded.telegram_file_id, updated_at=excluded.updated_at""",
-                (client_id, data["threads_followers"], data["telegram_followers"], data["weekly_leads"], data["overview_file_id"], data["content_file_id"], data.get("telegram_file_id"), now, now),
+                """INSERT INTO client_baseline(client_id, total_views, threads_followers, telegram_followers, weekly_leads, overview_file_id, content_file_id, telegram_file_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_id) DO UPDATE SET total_views=excluded.total_views, threads_followers=excluded.threads_followers, telegram_followers=excluded.telegram_followers, weekly_leads=excluded.weekly_leads, overview_file_id=excluded.overview_file_id, content_file_id=excluded.content_file_id, telegram_file_id=excluded.telegram_file_id, updated_at=excluded.updated_at""",
+                (client_id, data["total_views"], data["threads_followers"], data["telegram_followers"], data["weekly_leads"], data["overview_file_id"], data["content_file_id"], data.get("telegram_file_id"), now, now),
             )
             await conn.commit()
 
@@ -390,12 +397,33 @@ class Database:
         now = datetime.utcnow().isoformat()
         async with self.connect() as conn:
             await conn.execute(
-                """INSERT INTO weekly_stats(client_id, week_start, week_end, views, likes, replies, reposts, quotes, new_followers, telegram_clicks, best_post, manager_comment, created_at, updated_at, threads_followers, telegram_followers, applications, overview_file_id, content_file_id, telegram_file_id)
-                VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0, 0, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(client_id, week_start) DO UPDATE SET week_end=excluded.week_end, views=excluded.views, threads_followers=excluded.threads_followers, telegram_followers=excluded.telegram_followers, applications=excluded.applications, overview_file_id=excluded.overview_file_id, content_file_id=excluded.content_file_id, telegram_file_id=excluded.telegram_file_id, updated_at=excluded.updated_at""",
-                (client_id, week_start, week_end, data["views"], now, now, data["threads_followers"], data["telegram_followers"], data["applications"], data["overview_file_id"], data["content_file_id"], data.get("telegram_file_id")),
+                """INSERT INTO weekly_stats(client_id, week_start, week_end, total_views, views, likes, replies, reposts, quotes, new_followers, telegram_clicks, best_post, manager_comment, created_at, updated_at, threads_followers, telegram_followers, applications, overview_file_id, content_file_id, telegram_file_id)
+                VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(client_id, week_start) DO UPDATE SET week_end=excluded.week_end, total_views=excluded.total_views, views=excluded.views, threads_followers=excluded.threads_followers, telegram_followers=excluded.telegram_followers, applications=excluded.applications, overview_file_id=excluded.overview_file_id, content_file_id=excluded.content_file_id, telegram_file_id=excluded.telegram_file_id, updated_at=excluded.updated_at""",
+                (client_id, week_start, week_end, data["total_views"], data["views"], now, now, data["threads_followers"], data["telegram_followers"], data["applications"], data["overview_file_id"], data["content_file_id"], data.get("telegram_file_id")),
             )
             await conn.commit()
+
+    async def get_weekly_history(self, client_id: int, limit: int = 12):
+        async with self.connect() as conn:
+            return await (await conn.execute(
+                "SELECT * FROM weekly_stats WHERE client_id=? ORDER BY week_start DESC LIMIT ?",
+                (client_id, limit),
+            )).fetchall()
+
+    async def previous_total_views(self, client_id: int) -> int:
+        async with self.connect() as conn:
+            latest = await (await conn.execute(
+                "SELECT total_views FROM weekly_stats WHERE client_id=? ORDER BY week_start DESC LIMIT 1",
+                (client_id,),
+            )).fetchone()
+            if latest and latest["total_views"]:
+                return int(latest["total_views"])
+            baseline = await (await conn.execute(
+                "SELECT total_views FROM client_baseline WHERE client_id=?",
+                (client_id,),
+            )).fetchone()
+            return int(baseline["total_views"]) if baseline else 0
 
     async def clients_missing_weekly_stats(self, week_start: str):
         async with self.connect() as conn:

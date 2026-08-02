@@ -24,6 +24,7 @@ class WeeklyStatsFlow(StatesGroup):
 
 
 class BaselineFlow(StatesGroup):
+    total_views = State()
     threads_followers = State()
     telegram_followers = State()
     weekly_leads = State()
@@ -32,6 +33,7 @@ class BaselineFlow(StatesGroup):
     telegram_screen = State()
 
 class WeeklyAnalyticsFlow(StatesGroup):
+    total_views = State()
     threads_followers = State()
     telegram_followers = State()
     views = State()

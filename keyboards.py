@@ -31,8 +31,8 @@ def client_card_kb(client_id: int, topic_id: int | None = None, work_group_id: i
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📄 Контент-план", callback_data=f"client_sheet:{client_id}"), InlineKeyboardButton(text="📤 Отправить ветки", callback_data=f"client_send_posts:{client_id}")],
         [InlineKeyboardButton(text="🔗 Invite", callback_data=f"client_invite:{client_id}"), topic_button],
-        [InlineKeyboardButton(text="🚀 Старт проекта", callback_data=f"baseline_start:{client_id}"), InlineKeyboardButton(text="📈 Недельная статистика", callback_data=f"weekly_analytics:{client_id}")],
-        [InlineKeyboardButton(text="📊 Аналитика клиента", callback_data=f"client_analytics:{client_id}"), InlineKeyboardButton(text="📤 Отправить аналитику", callback_data=f"client_send_analytics:{client_id}")],
+        [InlineKeyboardButton(text="🚀 Старт проекта", callback_data=f"baseline_start:{client_id}"), InlineKeyboardButton(text="📈 Обновить статистику", callback_data=f"weekly_analytics:{client_id}")],
+        [InlineKeyboardButton(text="📊 История роста", callback_data=f"client_analytics:{client_id}"), InlineKeyboardButton(text="📤 Отправить аналитику", callback_data=f"client_send_analytics:{client_id}")],
         [InlineKeyboardButton(text="📑 Документы", callback_data=f"client_docs:{client_id}"), InlineKeyboardButton(text="💼 Услуги и стоимость", callback_data=f"client_terms:{client_id}")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"client_view:{client_id}"), InlineKeyboardButton(text="🔴 Закрыть", callback_data=f"client_archive:{client_id}")],
     ])
