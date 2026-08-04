@@ -55,3 +55,11 @@ class ClientTermsFlow(StatesGroup):
     services = State()
     service_price = State()
     billing_start = State()
+
+
+class ActFlow(StatesGroup):
+    content = State()
+
+
+class ActRemarkFlow(StatesGroup):
+    text = State()

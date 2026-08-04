@@ -316,3 +316,102 @@ def temp_pdf(prefix: str) -> str:
     fd, path = tempfile.mkstemp(prefix=prefix, suffix=".pdf")
     os.close(fd)
     return path
+
+
+def generate_act_pdf(
+    client,
+    act,
+    settings,
+    output_path: str,
+    *,
+    signed: bool = False,
+    signed_at: str | None = None,
+    signer_name: str | None = None,
+    signer_telegram_id: int | None = None,
+) -> str:
+    import json
+    body, small, title, h = _styles()
+    pdf = SimpleDocTemplate(
+        output_path,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
+        title=f"Акт оказанных услуг № {act['act_number']}",
+        author=settings.executor_name,
+    )
+
+    results = json.loads(act["results_json"] or "{}")
+    story = [
+        _p(f"АКТ ОКАЗАННЫХ УСЛУГ № {act['act_number']}", title),
+        _p(
+            f"к договору оказания услуг по продвижению в Threads\n"
+            f"Период: {act['period_start']} — {act['period_end']}",
+            small,
+        ),
+        _p(
+            f"{settings.executor_name}, ИНН {settings.executor_inn}, именуемая «Исполнитель», "
+            f"и {client['legal_name'] or client['name']}, именуемый(ая) «Заказчик», "
+            "составили настоящий Акт о нижеследующем.",
+            body,
+        ),
+        _p("1. Оказанные услуги", h),
+        _p(act["services_text"], body),
+        _p("2. Результаты за расчётный период", h),
+        _p(
+            f"Опубликовано веток (постов): {results.get('published_posts', 0)}\n"
+            f"Подготовлено и предоставлено ежемесячных аналитик: {results.get('analytics_count', 1)}\n\n"
+            f"Общие просмотры аккаунта: {results.get('views_start', 0):,} → {results.get('views_end', 0):,} "
+            f"({results.get('views_growth', 0):+,})\n"
+            f"Подписчики Threads: {results.get('threads_start', 0):,} → {results.get('threads_end', 0):,} "
+            f"({results.get('threads_growth', 0):+,})\n"
+            f"Подписчики Telegram: {results.get('telegram_start', 0):,} → {results.get('telegram_end', 0):,} "
+            f"({results.get('telegram_growth', 0):+,})\n"
+            f"Заявки за период: {results.get('applications', 0):,}",
+            body,
+        ),
+        _p("3. Стоимость услуг", h),
+        _p(f"Стоимость оказанных услуг за период составляет {money(act['amount'])}.", body),
+        _p("4. Приёмка услуг", h),
+        _p(
+            "Заказчик подтверждает, что указанные в настоящем Акте услуги оказаны. "
+            "При наличии замечаний Заказчик направляет их через Telegram-бот до подписания Акта.",
+            body,
+        ),
+    ]
+
+    if signed:
+        story.append(_p("5. Электронное подписание", h))
+        story.append(_p(
+            f"Акт подписан Заказчиком в Telegram-боте.\n"
+            f"Подписант: {signer_name or client['legal_name'] or client['name']}\n"
+            f"Telegram ID: {signer_telegram_id or '—'}\n"
+            f"Дата и время подписания: {signed_at or datetime.now().isoformat(timespec='seconds')}",
+            body,
+        ))
+    else:
+        story.append(_p(
+            "Документ направлен Заказчику для ознакомления и электронного подписания в Telegram-боте.",
+            small,
+        ))
+
+    details = [
+        ["Исполнитель", settings.executor_name],
+        ["ИНН Исполнителя", settings.executor_inn or "не указан"],
+        ["Заказчик", client["legal_name"] or client["name"]],
+        ["Стоимость", money(act["amount"])],
+    ]
+    table = Table(details, colWidths=[42 * mm, 113 * mm])
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "ContractSans"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(table)
+
+    pdf.build(story)
+    return output_path

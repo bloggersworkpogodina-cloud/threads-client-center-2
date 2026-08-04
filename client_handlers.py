@@ -6,11 +6,11 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from states import ManagerMessage, PartialPublication, ResultsFlow, ConsentFlow
+from states import ManagerMessage, PartialPublication, ResultsFlow, ConsentFlow, ActRemarkFlow
 from keyboards import admin_menu, client_menu, docs_begin_kb, contract_accept_kb, pd_consent_kb
 from posts import send_today_posts
 from topics import ensure_topic, topic_log
-from documents import generate_contract_pdf, generate_policy_pdf, contract_version, policy_version, temp_pdf
+from documents import generate_contract_pdf, generate_policy_pdf, generate_act_pdf, contract_version, policy_version, temp_pdf
 
 router = Router()
 DB = None
@@ -325,6 +325,106 @@ async def plan(message: Message):
         inline_keyboard=[[InlineKeyboardButton(text="Открыть контент-план", url=c["sheet_url"])]]
     )
     await message.answer("Ваш контент-план:", reply_markup=kb)
+
+
+
+@router.callback_query(F.data.startswith("act_accept:"))
+async def act_accept(callback: CallbackQuery):
+    act_id = int(callback.data.split(":")[1])
+    act = await DB.get_service_act(act_id)
+    c = await DB.get_client_by_tg(callback.from_user.id)
+
+    if not act or not c or int(act["client_id"]) != int(c["id"]):
+        await callback.answer("Акт не найден", show_alert=True)
+        return
+    if act["status"] == "signed":
+        await callback.answer("Акт уже подписан ✅", show_alert=True)
+        return
+
+    signer_name = c["legal_name"] or c["name"]
+    await DB.sign_service_act(
+        act_id,
+        signer_name,
+        callback.from_user.id,
+        callback.from_user.username,
+    )
+    act = await DB.get_service_act(act_id)
+
+    path = temp_pdf(f"act_signed_{act_id}_")
+    try:
+        generate_act_pdf(
+            c, act, SETTINGS, path,
+            signed=True,
+            signed_at=act["signed_at"],
+            signer_name=signer_name,
+            signer_telegram_id=callback.from_user.id,
+        )
+        FSInputFile = __import__("aiogram.types", fromlist=["FSInputFile"]).FSInputFile
+        sent = await callback.bot.send_document(
+            chat_id=callback.from_user.id,
+            document=FSInputFile(path),
+            caption="✅ <b>Акт подписан</b>\nСохраните подписанный PDF.",
+        )
+        await DB.set_service_act_signed_file(act_id, sent.document.file_id)
+    finally:
+        try:
+            __import__("os").remove(path)
+        except OSError:
+            pass
+
+    await DB.log_event(c["id"], "service_act_signed", {"act_id": act_id})
+    await topic_log(
+        callback.bot, DB, SETTINGS.work_group_id, c["id"],
+        f"✅ Клиент подписал акт № {act['act_number']}.\n"
+        f"Период: {act['period_start']}–{act['period_end']}\n"
+        f"ФИО: {signer_name}\nTelegram ID: {callback.from_user.id}"
+    )
+    await callback.answer("Акт подписан ✅")
+
+
+@router.callback_query(F.data.startswith("act_remark:"))
+async def act_remark(callback: CallbackQuery, state: FSMContext):
+    act_id = int(callback.data.split(":")[1])
+    act = await DB.get_service_act(act_id)
+    c = await DB.get_client_by_tg(callback.from_user.id)
+    if not act or not c or int(act["client_id"]) != int(c["id"]):
+        await callback.answer("Акт не найден", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(act_id=act_id)
+    await state.set_state(ActRemarkFlow.text)
+    await callback.message.answer("Опишите замечания к акту одним сообщением.")
+    await callback.answer()
+
+
+@router.message(ActRemarkFlow.text)
+async def act_remark_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    act_id = int(data["act_id"])
+    remarks = (message.text or "").strip()
+    if len(remarks) < 3:
+        await message.answer("Опишите замечания чуть подробнее.")
+        return
+
+    act = await DB.get_service_act(act_id)
+    c = await DB.get_client_by_tg(message.from_user.id)
+    if not act or not c or int(act["client_id"]) != int(c["id"]):
+        await state.clear()
+        return
+
+    await DB.set_service_act_remarks(act_id, remarks)
+    await DB.log_event(c["id"], "service_act_remarks", {"act_id": act_id, "remarks": remarks})
+    await topic_log(
+        message.bot, DB, SETTINGS.work_group_id, c["id"],
+        f"💬 <b>Замечания клиента к акту № {act['act_number']}</b>\n\n{remarks}"
+    )
+    await state.clear()
+    await message.answer(
+        "Замечания отправлены менеджеру. После корректировки акт будет направлен повторно.",
+        reply_markup=client_menu(),
+    )
+
 
 @router.message(F.text == "💬 Связь с менеджером")
 async def manager(message: Message,state:FSMContext):

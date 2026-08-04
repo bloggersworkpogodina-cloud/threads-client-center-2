@@ -136,6 +136,29 @@ class Database:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS service_acts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id INTEGER NOT NULL REFERENCES clients(id),
+            period_start TEXT NOT NULL,
+            period_end TEXT NOT NULL,
+            act_number TEXT NOT NULL,
+            services_text TEXT NOT NULL,
+            amount INTEGER NOT NULL DEFAULT 0,
+            results_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'draft',
+            draft_file_id TEXT,
+            signed_file_id TEXT,
+            sent_at TEXT,
+            signed_at TEXT,
+            signer_name TEXT,
+            signer_telegram_id INTEGER,
+            signer_telegram_username TEXT,
+            remarks TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(client_id, period_start, period_end)
+        );
+
         CREATE TABLE IF NOT EXISTS client_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_id INTEGER NOT NULL REFERENCES clients(id),
@@ -208,7 +231,7 @@ class Database:
             await conn.commit()
             required = {
                 "clients", "daily_posts", "publication_confirmations",
-                "client_results", "weekly_stats", "client_baseline", "client_events", "client_consents",
+                "client_results", "weekly_stats", "client_baseline", "service_acts", "client_events", "client_consents",
             }
             rows = await (await conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -484,6 +507,174 @@ class Database:
             await conn.commit()
             return True
 
+
+    async def act_results(self, client_id: int, period_start: str, period_end: str) -> dict[str, int]:
+        async with self.connect() as conn:
+            publication = await (await conn.execute(
+                """SELECT COALESCE(SUM(published_posts), 0) AS published
+                   FROM publication_confirmations
+                   WHERE client_id=? AND confirmation_date BETWEEN ? AND ?""",
+                (client_id, period_start, period_end),
+            )).fetchone()
+
+            rows = await (await conn.execute(
+                """SELECT * FROM weekly_stats
+                   WHERE client_id=? AND week_end >= ? AND week_start <= ?
+                   ORDER BY week_start ASC""",
+                (client_id, period_start, period_end),
+            )).fetchall()
+
+            baseline = await (await conn.execute(
+                "SELECT * FROM client_baseline WHERE client_id=?",
+                (client_id,),
+            )).fetchone()
+
+            if rows:
+                first = rows[0]
+                last = rows[-1]
+                first_views = int(baseline["total_views"] or 0) if baseline else max(int(first["total_views"] or 0) - int(first["views"] or 0), 0)
+                first_threads = int(baseline["threads_followers"] or 0) if baseline else int(first["threads_followers"] or 0)
+                first_telegram = int(baseline["telegram_followers"] or 0) if baseline else int(first["telegram_followers"] or 0)
+                end_views = int(last["total_views"] or 0)
+                end_threads = int(last["threads_followers"] or 0)
+                end_telegram = int(last["telegram_followers"] or 0)
+                applications = sum(int(row["applications"] or 0) for row in rows)
+            else:
+                first_views = int(baseline["total_views"] or 0) if baseline else 0
+                first_threads = int(baseline["threads_followers"] or 0) if baseline else 0
+                first_telegram = int(baseline["telegram_followers"] or 0) if baseline else 0
+                end_views = first_views
+                end_threads = first_threads
+                end_telegram = first_telegram
+                applications = 0
+
+            return {
+                "published_posts": int(publication["published"] or 0),
+                "analytics_count": 1,
+                "views_start": first_views,
+                "views_end": end_views,
+                "views_growth": end_views - first_views,
+                "threads_start": first_threads,
+                "threads_end": end_threads,
+                "threads_growth": end_threads - first_threads,
+                "telegram_start": first_telegram,
+                "telegram_end": end_telegram,
+                "telegram_growth": end_telegram - first_telegram,
+                "applications": applications,
+            }
+
+    async def save_service_act(
+        self,
+        client_id: int,
+        period_start: str,
+        period_end: str,
+        services_text: str,
+        amount: int,
+        results: dict,
+    ):
+        import json
+        now = datetime.utcnow().isoformat()
+        act_number = f"{client_id}-{period_end.replace('-', '')}"
+        async with self.connect() as conn:
+            await conn.execute(
+                """INSERT INTO service_acts(
+                    client_id, period_start, period_end, act_number,
+                    services_text, amount, results_json, status,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?)
+                ON CONFLICT(client_id, period_start, period_end) DO UPDATE SET
+                    services_text=excluded.services_text,
+                    amount=excluded.amount,
+                    results_json=excluded.results_json,
+                    status='draft',
+                    draft_file_id=NULL,
+                    signed_file_id=NULL,
+                    sent_at=NULL,
+                    signed_at=NULL,
+                    signer_name=NULL,
+                    signer_telegram_id=NULL,
+                    signer_telegram_username=NULL,
+                    remarks=NULL,
+                    updated_at=excluded.updated_at""",
+                (
+                    client_id, period_start, period_end, act_number,
+                    services_text.strip(), int(amount), json.dumps(results, ensure_ascii=False),
+                    now, now,
+                ),
+            )
+            await conn.commit()
+            return await (await conn.execute(
+                "SELECT * FROM service_acts WHERE client_id=? AND period_start=? AND period_end=?",
+                (client_id, period_start, period_end),
+            )).fetchone()
+
+    async def get_service_act(self, act_id: int):
+        async with self.connect() as conn:
+            return await (await conn.execute(
+                "SELECT * FROM service_acts WHERE id=?",
+                (act_id,),
+            )).fetchone()
+
+    async def get_service_act_for_period(self, client_id: int, period_start: str, period_end: str):
+        async with self.connect() as conn:
+            return await (await conn.execute(
+                """SELECT * FROM service_acts
+                   WHERE client_id=? AND period_start=? AND period_end=?""",
+                (client_id, period_start, period_end),
+            )).fetchone()
+
+    async def set_service_act_sent(self, act_id: int, draft_file_id: str) -> None:
+        now = datetime.utcnow().isoformat()
+        async with self.connect() as conn:
+            await conn.execute(
+                """UPDATE service_acts
+                   SET status='sent', draft_file_id=?, sent_at=?, updated_at=?
+                   WHERE id=?""",
+                (draft_file_id, now, now, act_id),
+            )
+            await conn.commit()
+
+    async def sign_service_act(
+        self,
+        act_id: int,
+        signer_name: str,
+        telegram_id: int,
+        telegram_username: str | None,
+        signed_file_id: str | None = None,
+    ) -> None:
+        now = datetime.utcnow().isoformat()
+        async with self.connect() as conn:
+            await conn.execute(
+                """UPDATE service_acts
+                   SET status='signed', signed_file_id=?, signed_at=?,
+                       signer_name=?, signer_telegram_id=?,
+                       signer_telegram_username=?, remarks=NULL, updated_at=?
+                   WHERE id=?""",
+                (
+                    signed_file_id, now, signer_name.strip(), telegram_id,
+                    telegram_username, now, act_id,
+                ),
+            )
+            await conn.commit()
+
+    async def set_service_act_signed_file(self, act_id: int, signed_file_id: str) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                "UPDATE service_acts SET signed_file_id=?, updated_at=? WHERE id=?",
+                (signed_file_id, datetime.utcnow().isoformat(), act_id),
+            )
+            await conn.commit()
+
+    async def set_service_act_remarks(self, act_id: int, remarks: str) -> None:
+        async with self.connect() as conn:
+            await conn.execute(
+                """UPDATE service_acts
+                   SET status='remarks', remarks=?, updated_at=?
+                   WHERE id=?""",
+                (remarks.strip(), datetime.utcnow().isoformat(), act_id),
+            )
+            await conn.commit()
 
     async def set_client_documents(
         self,

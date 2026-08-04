@@ -6,11 +6,11 @@ from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow, BaselineFlow, WeeklyAnalyticsFlow, ClientDocsFlow, ClientTermsFlow
+from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow, BaselineFlow, WeeklyAnalyticsFlow, ClientDocsFlow, ClientTermsFlow, ActFlow
 from keyboards import admin_menu, client_card_kb, confirm_client_kb, skip_photo_kb
 from topics import ensure_topic, topic_log
-from documents import generate_contract_pdf, generate_policy_pdf, temp_pdf
-from billing import period, fmt
+from documents import generate_contract_pdf, generate_policy_pdf, generate_act_pdf, temp_pdf
+from billing import period, fmt, latest_completed_period
 from posts import send_today_posts
 
 router = Router()
@@ -797,6 +797,167 @@ async def client_docs_send(callback: CallbackQuery):
         "📨 Документы вручную направлены клиенту на подтверждение."
     )
     await callback.answer("Отправлено ✅")
+
+
+
+@router.callback_query(F.data.startswith("client_act:"))
+async def client_act_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if not c:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+    if not c["billing_start"]:
+        await callback.answer("Не указана дата расчётного периода", show_alert=True)
+        return
+
+    completed = latest_completed_period(c["billing_start"])
+    if not completed:
+        await callback.answer("Первый расчётный период ещё не завершён", show_alert=True)
+        return
+
+    start_date, end_date, _ = completed
+    await state.clear()
+    await state.update_data(
+        client_id=cid,
+        period_start=start_date.isoformat(),
+        period_end=end_date.isoformat(),
+    )
+    await state.set_state(ActFlow.content)
+    await callback.message.answer(
+        f"<b>Акт за период {fmt(start_date)}–{fmt(end_date)}</b>\n\n"
+        "Напишите, какие услуги фактически указываем в акте.\n\n"
+        "Например:\n"
+        "1. Подготовка и публикация веток (постов) в Threads.\n"
+        "2. Подготовка и предоставление ежемесячной аналитики."
+    )
+    await callback.answer()
+
+
+@router.message(ActFlow.content)
+async def client_act_content(message: Message, state: FSMContext):
+    services_text = (message.text or "").strip()
+    if len(services_text) < 10:
+        await message.answer("Опишите содержание акта чуть подробнее.")
+        return
+
+    data = await state.get_data()
+    cid = int(data["client_id"])
+    c = await DB.get_client(cid)
+    if not c:
+        await state.clear()
+        await message.answer("Клиент не найден.")
+        return
+
+    results = await DB.act_results(cid, data["period_start"], data["period_end"])
+    act = await DB.save_service_act(
+        cid,
+        data["period_start"],
+        data["period_end"],
+        services_text,
+        int(c["service_price"] or 0),
+        results,
+    )
+    await state.clear()
+
+    path = temp_pdf(f"act_preview_{act['id']}_")
+    try:
+        generate_act_pdf(c, act, SETTINGS, path, signed=False)
+        FSInputFile = __import__("aiogram.types", fromlist=["FSInputFile"]).FSInputFile
+        await message.answer_document(
+            FSInputFile(path),
+            caption=(
+                f"🧾 <b>Предварительный просмотр акта</b>\n"
+                f"Период: {act['period_start']}–{act['period_end']}\n"
+                f"Стоимость: {act['amount']:,} ₽"
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📨 Отправить клиенту", callback_data=f"act_send:{act['id']}")],
+                [InlineKeyboardButton(text="✏️ Изменить содержание", callback_data=f"act_edit:{act['id']}")],
+            ]),
+        )
+    finally:
+        try:
+            __import__("os").remove(path)
+        except OSError:
+            pass
+
+
+@router.callback_query(F.data.startswith("act_edit:"))
+async def act_edit(callback: CallbackQuery, state: FSMContext):
+    act_id = int(callback.data.split(":")[1])
+    act = await DB.get_service_act(act_id)
+    if not act:
+        await callback.answer("Акт не найден", show_alert=True)
+        return
+
+    await state.clear()
+    await state.update_data(
+        client_id=act["client_id"],
+        period_start=act["period_start"],
+        period_end=act["period_end"],
+    )
+    await state.set_state(ActFlow.content)
+    await callback.message.answer(
+        "Введите новое содержание акта:\n\n"
+        f"Сейчас:\n{act['services_text']}"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("act_send:"))
+async def act_send(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+
+    act_id = int(callback.data.split(":")[1])
+    act = await DB.get_service_act(act_id)
+    if not act:
+        await callback.answer("Акт не найден", show_alert=True)
+        return
+    c = await DB.get_client(act["client_id"])
+    if not c or not c["telegram_id"]:
+        await callback.answer("Клиент ещё не подключён к боту", show_alert=True)
+        return
+    if not await DB.documents_fully_accepted(c["id"]):
+        await callback.answer("Сначала клиент должен подписать договор", show_alert=True)
+        return
+
+    path = temp_pdf(f"act_{act_id}_")
+    try:
+        generate_act_pdf(c, act, SETTINGS, path, signed=False)
+        FSInputFile = __import__("aiogram.types", fromlist=["FSInputFile"]).FSInputFile
+        sent = await callback.bot.send_document(
+            chat_id=c["telegram_id"],
+            document=FSInputFile(path),
+            caption=(
+                f"🧾 <b>Акт оказанных услуг</b>\n"
+                f"Период: {act['period_start']}–{act['period_end']}\n\n"
+                "Ознакомьтесь с PDF и подтвердите приёмку услуг."
+            ),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Подписать акт", callback_data=f"act_accept:{act_id}")],
+                [InlineKeyboardButton(text="💬 Есть замечания", callback_data=f"act_remark:{act_id}")],
+            ]),
+        )
+        await DB.set_service_act_sent(act_id, sent.document.file_id)
+        await DB.log_event(c["id"], "service_act_sent", {"act_id": act_id})
+        await topic_log(
+            callback.bot, DB, SETTINGS.work_group_id, c["id"],
+            f"🧾 Клиенту отправлен акт № {act['act_number']} за период "
+            f"{act['period_start']}–{act['period_end']}."
+        )
+    finally:
+        try:
+            __import__("os").remove(path)
+        except OSError:
+            pass
+
+    await callback.answer("Акт отправлен ✅")
+
 
 @router.callback_query(F.data.startswith("client_docs:"))
 async def client_docs_start(callback: CallbackQuery, state: FSMContext):

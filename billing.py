@@ -9,3 +9,19 @@ def add_month(d, n=1):
 def period(v, offset=0):
     base=parse_date(v); start=add_month(base,offset); nxt=add_month(base,offset+1)
     return start, nxt-timedelta(days=1), start-timedelta(days=7)
+
+
+def latest_completed_period(start_iso: str, today=None):
+    """Return the latest fully completed billing period, or None."""
+    from datetime import date
+    current_day = today or date.today()
+    offset = 0
+    latest = None
+    while offset < 600:
+        start, end, _ = period(start_iso, offset)
+        if end <= current_day:
+            latest = (start, end, offset)
+            offset += 1
+            continue
+        break
+    return latest
