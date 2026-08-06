@@ -85,6 +85,7 @@ class Database:
             post_date TEXT NOT NULL,
             slot TEXT,
             body TEXT NOT NULL,
+            image_url TEXT,
             source_row INTEGER,
             sent_at TEXT NOT NULL,
             UNIQUE(client_id, post_date, source_row)
@@ -225,6 +226,10 @@ class Database:
                 await conn.execute("ALTER TABLE clients ADD COLUMN contract_version TEXT")
             if "policy_version" not in client_columns:
                 await conn.execute("ALTER TABLE clients ADD COLUMN policy_version TEXT")
+
+            daily_post_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(daily_posts)")).fetchall()}
+            if "image_url" not in daily_post_columns:
+                await conn.execute("ALTER TABLE daily_posts ADD COLUMN image_url TEXT")
 
             consent_columns = {row[1] for row in await (await conn.execute("PRAGMA table_info(client_consents)")).fetchall()}
             if "contract_accepted_at" not in consent_columns:
@@ -380,9 +385,17 @@ class Database:
         async with self.connect() as conn:
             for idx, post in enumerate(posts):
                 await conn.execute(
-                    """INSERT OR IGNORE INTO daily_posts(client_id, post_date, slot, body, source_row, sent_at)
-                    VALUES (?, ?, ?, ?, ?, ?)""",
-                    (client_id, post_date, post.get("time"), post["text"], int(post.get("source_row", idx)), datetime.utcnow().isoformat()),
+                    """INSERT OR IGNORE INTO daily_posts(client_id, post_date, slot, body, image_url, source_row, sent_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        client_id,
+                        post_date,
+                        post.get("time"),
+                        post["text"],
+                        (post.get("image") or "").strip() or None,
+                        int(post.get("source_row", idx)),
+                        datetime.utcnow().isoformat(),
+                    ),
                 )
             await conn.commit()
             return await (await conn.execute("SELECT * FROM daily_posts WHERE client_id=? AND post_date=? ORDER BY slot", (client_id, post_date))).fetchall()

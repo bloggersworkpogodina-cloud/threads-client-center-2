@@ -82,6 +82,7 @@ class GoogleSheetsService:
             "date": ["дата", "date"],
             "time": ["время", "time"],
             "text": ["ветка", "текст", "post"],
+            "image": ["изображение", "картинка", "фото", "image", "photo"],
             "status": ["статус", "status"],
         }
         indices: dict[str, int] = {}
@@ -132,6 +133,7 @@ class GoogleSheetsService:
                     {
                         "time": cell("time"),
                         "text": text,
+                        "image": cell("image"),
                         "source_row": source_row,
                     }
                 )
