@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import re
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -49,7 +50,7 @@ async def _show_client_cabinet(message: Message):
 
 
 async def _send_current_documents(message: Message, client):
-    signer = client["legal_name"]
+    signer = client["signer_name"]
     if not signer:
         raise RuntimeError("legal_name is required")
 
@@ -125,11 +126,24 @@ async def _begin_documents(message: Message, state: FSMContext, client):
         )
         return
 
-    if not client["legal_name"]:
-        await state.set_state(ConsentFlow.signer_name)
+    required_legal = (
+        client["customer_type"] and client["legal_name"] and client["signer_name"]
+        and client["customer_inn"] and client["customer_tax_status"]
+        and client["customer_address"] and client["customer_email"]
+        and client["customer_phone"]
+    )
+    if not required_legal:
+        await state.clear()
+        await state.set_state(ConsentFlow.customer_type)
         await message.answer(
-            "Для формирования договора введите ваши ФИО полностью.\n\n"
-            "Например: Иванов Иван Иванович."
+            "Для формирования договора нужно заполнить реквизиты Заказчика.\n\n"
+            "Выберите ваш статус:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Физическое лицо", callback_data="legal_type:individual")],
+                [InlineKeyboardButton(text="Самозанятый", callback_data="legal_type:self_employed")],
+                [InlineKeyboardButton(text="ИП", callback_data="legal_type:ip")],
+                [InlineKeyboardButton(text="ООО", callback_data="legal_type:company")],
+            ]),
         )
         return
 
@@ -199,26 +213,187 @@ async def docs_begin(callback: CallbackQuery, state: FSMContext):
         )
 
 
+@router.callback_query(F.data.startswith("legal_type:"))
+async def legal_type(callback: CallbackQuery, state: FSMContext):
+    kind = callback.data.split(":", 1)[1]
+    labels = {
+        "individual": "физическое лицо",
+        "self_employed": "самозанятый",
+        "ip": "индивидуальный предприниматель",
+        "company": "юридическое лицо (ООО)",
+    }
+    if kind not in labels:
+        await callback.answer("Неизвестный статус", show_alert=True)
+        return
+    await state.update_data(customer_type=kind)
+    await state.set_state(ConsentFlow.legal_name)
+    prompt = (
+        "Введите полное наименование организации:"
+        if kind == "company"
+        else "Введите ваши ФИО полностью:"
+    )
+    await callback.message.answer(prompt)
+    await callback.answer()
+
+
+@router.message(ConsentFlow.legal_name)
+async def legal_name(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    data = await state.get_data()
+    kind = data["customer_type"]
+    if len(value) < 5:
+        await message.answer("Введите полное значение.")
+        return
+    await state.update_data(legal_name=value)
+    if kind == "company":
+        await state.set_state(ConsentFlow.signer_name)
+        await message.answer("Введите ФИО лица, которое подписывает договор от имени организации:")
+    else:
+        await state.update_data(signer_name=value, signer_authority=None)
+        await state.set_state(ConsentFlow.inn)
+        await message.answer("Введите ИНН:")
+
+
 @router.message(ConsentFlow.signer_name)
-async def docs_signer_name(message: Message, state: FSMContext):
+async def signer_name(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if len(value.split()) < 2:
+        await message.answer("Введите ФИО подписанта полностью.")
+        return
+    await state.update_data(signer_name=value)
+    await state.set_state(ConsentFlow.signer_authority)
+    await message.answer(
+        "Укажите основание полномочий подписанта.\\n"
+        "Например: Устава, доверенности № 5 от 01.08.2026."
+    )
+
+
+@router.message(ConsentFlow.signer_authority)
+async def signer_authority(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if len(value) < 3:
+        await message.answer("Укажите основание полномочий.")
+        return
+    await state.update_data(signer_authority=value)
+    await state.set_state(ConsentFlow.inn)
+    await message.answer("Введите ИНН организации:")
+
+
+@router.message(ConsentFlow.inn)
+async def legal_inn(message: Message, state: FSMContext):
+    value = re.sub(r"\D", "", message.text or "")
+    data = await state.get_data()
+    kind = data["customer_type"]
+    allowed = {10, 12}
+    if len(value) not in allowed:
+        await message.answer("ИНН должен содержать 10 или 12 цифр.")
+        return
+    if kind in {"individual", "self_employed", "ip"} and len(value) != 12:
+        await message.answer("Для физического лица, самозанятого или ИП ИНН содержит 12 цифр.")
+        return
+    if kind == "company" and len(value) != 10:
+        await message.answer("Для ООО ИНН содержит 10 цифр.")
+        return
+    await state.update_data(customer_inn=value)
+    await state.set_state(ConsentFlow.tax_status)
+    await message.answer(
+        "Укажите налоговый статус / систему налогообложения.\\n\\n"
+        "Например: НПД, УСН «Доходы», УСН «Доходы минус расходы», ОСНО."
+    )
+
+
+@router.message(ConsentFlow.tax_status)
+async def legal_tax_status(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if len(value) < 2:
+        await message.answer("Укажите налоговый статус.")
+        return
+    data = await state.get_data()
+    await state.update_data(customer_tax_status=value)
+    if data["customer_type"] in {"ip", "company"}:
+        await state.set_state(ConsentFlow.ogrn)
+        await message.answer("Введите ОГРНИП:" if data["customer_type"] == "ip" else "Введите ОГРН:")
+    else:
+        await state.update_data(customer_ogrn=None, customer_kpp=None)
+        await state.set_state(ConsentFlow.address)
+        await message.answer("Введите адрес регистрации:")
+
+
+@router.message(ConsentFlow.ogrn)
+async def legal_ogrn(message: Message, state: FSMContext):
+    value = re.sub(r"\D", "", message.text or "")
+    data = await state.get_data()
+    expected = 15 if data["customer_type"] == "ip" else 13
+    if len(value) != expected:
+        await message.answer(f"Номер должен содержать {expected} цифр.")
+        return
+    await state.update_data(customer_ogrn=value)
+    if data["customer_type"] == "company":
+        await state.set_state(ConsentFlow.kpp)
+        await message.answer("Введите КПП:")
+    else:
+        await state.update_data(customer_kpp=None)
+        await state.set_state(ConsentFlow.address)
+        await message.answer("Введите адрес регистрации:")
+
+
+@router.message(ConsentFlow.kpp)
+async def legal_kpp(message: Message, state: FSMContext):
+    value = re.sub(r"\D", "", message.text or "")
+    if len(value) != 9:
+        await message.answer("КПП должен содержать 9 цифр.")
+        return
+    await state.update_data(customer_kpp=value)
+    await state.set_state(ConsentFlow.address)
+    await message.answer("Введите юридический адрес организации:")
+
+
+@router.message(ConsentFlow.address)
+async def legal_address(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if len(value) < 8:
+        await message.answer("Введите адрес полностью.")
+        return
+    await state.update_data(customer_address=value)
+    await state.set_state(ConsentFlow.email)
+    await message.answer("Введите email:")
+
+
+@router.message(ConsentFlow.email)
+async def legal_email(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    if "@" not in value or "." not in value.split("@")[-1]:
+        await message.answer("Введите корректный email.")
+        return
+    await state.update_data(customer_email=value)
+    await state.set_state(ConsentFlow.phone)
+    await message.answer("Введите номер телефона:")
+
+
+@router.message(ConsentFlow.phone)
+async def legal_phone(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    digits = re.sub(r"\D", "", value)
+    if len(digits) < 10:
+        await message.answer("Введите корректный номер телефона.")
+        return
+
     c = await DB.get_client_by_tg(message.from_user.id)
     if not c:
         await state.clear()
         return
-    signer = (message.text or "").strip()
-    if len(signer.split()) < 2 or len(signer) < 5:
-        await message.answer("Введите ФИО полностью, например: Иванов Иван Иванович.")
-        return
 
-    await DB.set_client_legal_name(c["id"], signer)
-    await DB.invalidate_client_documents(c["id"])
+    data = await state.get_data()
+    data["customer_phone"] = value
+    await DB.save_client_legal_details(c["id"], data)
     await state.clear()
+
     c = await DB.get_client(c["id"])
     await _send_current_documents(message, c)
     await message.answer(
-        "Пожалуйста, ознакомьтесь с договором.\n\n"
-        "Нажимая «Подписать договор», вы подтверждаете, что прочитали документ "
-        "и принимаете его условия.",
+        "Проверьте договор и реквизиты.\\n\\n"
+        "Нажимая «Подписать договор», вы подтверждаете, что ознакомились "
+        "с документом и принимаете его условия.",
         reply_markup=contract_accept_kb(),
     )
 
@@ -226,8 +401,8 @@ async def docs_signer_name(message: Message, state: FSMContext):
 @router.callback_query(F.data == "contract_accept")
 async def contract_accept(callback: CallbackQuery, state: FSMContext):
     c = await DB.get_client_by_tg(callback.from_user.id)
-    if not c or not c["legal_name"]:
-        await callback.answer("Сначала укажите ФИО", show_alert=True)
+    if not c or not c["signer_name"]:
+        await callback.answer("Сначала заполните реквизиты", show_alert=True)
         return
     if not c["contract_file_id"] or not c["policy_file_id"]:
         await callback.answer("Документы нужно сформировать заново", show_alert=True)
@@ -236,7 +411,7 @@ async def contract_accept(callback: CallbackQuery, state: FSMContext):
 
     await DB.save_contract_acceptance(
         c["id"],
-        c["legal_name"],
+        c["signer_name"],
         callback.from_user.id,
         callback.from_user.username,
         c["contract_file_id"],
@@ -246,14 +421,14 @@ async def contract_accept(callback: CallbackQuery, state: FSMContext):
         c["id"],
         "contract_accepted",
         {
-            "signer_name": c["legal_name"],
+            "signer_name": c["signer_name"],
             "telegram_id": callback.from_user.id,
             "contract_version": c["contract_version"],
         },
     )
     await topic_log(
         callback.bot, DB, SETTINGS.work_group_id, c["id"],
-        f"✍️ Клиент подписал договор.\nФИО: {c['legal_name']}\nTelegram ID: {callback.from_user.id}\nВерсия: {c['contract_version']}"
+        f"✍️ Клиент подписал договор.\nФИО: {c['signer_name']}\nTelegram ID: {callback.from_user.id}\nВерсия: {c['contract_version']}"
     )
 
     await callback.message.answer(
@@ -285,7 +460,7 @@ async def pd_consent_accept(callback: CallbackQuery, state: FSMContext):
         c["id"],
         "pd_consent_accepted",
         {
-            "signer_name": c["legal_name"],
+            "signer_name": c["signer_name"],
             "telegram_id": callback.from_user.id,
             "policy_version": c["policy_version"],
         },
@@ -293,7 +468,7 @@ async def pd_consent_accept(callback: CallbackQuery, state: FSMContext):
     await topic_log(
         callback.bot, DB, SETTINGS.work_group_id, c["id"],
         f"✅ Клиент дал согласие на обработку персональных данных.\n"
-        f"ФИО: {c['legal_name']}\nTelegram ID: {callback.from_user.id}\n"
+        f"ФИО: {c['signer_name']}\nTelegram ID: {callback.from_user.id}\n"
         f"Версия политики: {c['policy_version']}"
     )
     await callback.answer("Согласие сохранено ✅")

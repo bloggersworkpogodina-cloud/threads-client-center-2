@@ -48,7 +48,17 @@ class ClientDocsFlow(StatesGroup):
     policy = State()
 
 class ConsentFlow(StatesGroup):
+    customer_type = State()
+    legal_name = State()
     signer_name = State()
+    signer_authority = State()
+    inn = State()
+    tax_status = State()
+    ogrn = State()
+    kpp = State()
+    address = State()
+    email = State()
+    phone = State()
 
 
 class ClientTermsFlow(StatesGroup):

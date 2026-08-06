@@ -55,6 +55,16 @@ class Database:
             service_price INTEGER,
             billing_start TEXT,
             legal_name TEXT,
+            signer_name TEXT,
+            customer_type TEXT,
+            customer_inn TEXT,
+            customer_tax_status TEXT,
+            customer_ogrn TEXT,
+            customer_kpp TEXT,
+            customer_address TEXT,
+            customer_email TEXT,
+            customer_phone TEXT,
+            signer_authority TEXT,
             contract_version TEXT,
             policy_version TEXT,
             publish_mode TEXT NOT NULL DEFAULT 'client',
@@ -197,6 +207,20 @@ class Database:
                 await conn.execute("ALTER TABLE clients ADD COLUMN billing_start TEXT")
             if "legal_name" not in client_columns:
                 await conn.execute("ALTER TABLE clients ADD COLUMN legal_name TEXT")
+            for column, definition in {
+                "signer_name": "TEXT",
+                "customer_type": "TEXT",
+                "customer_inn": "TEXT",
+                "customer_tax_status": "TEXT",
+                "customer_ogrn": "TEXT",
+                "customer_kpp": "TEXT",
+                "customer_address": "TEXT",
+                "customer_email": "TEXT",
+                "customer_phone": "TEXT",
+                "signer_authority": "TEXT",
+            }.items():
+                if column not in client_columns:
+                    await conn.execute(f"ALTER TABLE clients ADD COLUMN {column} {definition}")
             if "contract_version" not in client_columns:
                 await conn.execute("ALTER TABLE clients ADD COLUMN contract_version TEXT")
             if "policy_version" not in client_columns:
@@ -702,6 +726,28 @@ class Database:
             )
             if reset_acceptance:
                 await conn.execute("DELETE FROM client_consents WHERE client_id = ?", (client_id,))
+            await conn.commit()
+
+    async def save_client_legal_details(self, client_id: int, data: dict[str, Any]) -> None:
+        fields = [
+            "legal_name", "signer_name", "customer_type", "customer_inn",
+            "customer_tax_status", "customer_ogrn", "customer_kpp",
+            "customer_address", "customer_email", "customer_phone",
+            "signer_authority",
+        ]
+        values = [data.get(field) for field in fields]
+        async with self.connect() as conn:
+            await conn.execute(
+                """UPDATE clients SET
+                    legal_name=?, signer_name=?, customer_type=?, customer_inn=?,
+                    customer_tax_status=?, customer_ogrn=?, customer_kpp=?,
+                    customer_address=?, customer_email=?, customer_phone=?,
+                    signer_authority=?, contract_file_id=NULL, policy_file_id=NULL,
+                    contract_version=NULL, policy_version=NULL, updated_at=?
+                   WHERE id=?""",
+                (*values, datetime.utcnow().isoformat(), client_id),
+            )
+            await conn.execute("DELETE FROM client_consents WHERE client_id=?", (client_id,))
             await conn.commit()
 
     async def set_client_legal_name(self, client_id: int, legal_name: str) -> None:
