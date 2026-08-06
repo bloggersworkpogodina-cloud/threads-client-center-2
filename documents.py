@@ -285,7 +285,7 @@ def generate_contract_pdf(client, signer_name: str, settings, output_path: str, 
 
     doc.build(story)
     return output_path
-tput_path
+    return output_path
 
 
 def generate_policy_pdf(settings, output_path: str) -> str:
@@ -450,4 +450,5 @@ def generate_act_pdf(
     story.append(table)
 
     pdf.build(story)
+    return output_path
     return output_path
