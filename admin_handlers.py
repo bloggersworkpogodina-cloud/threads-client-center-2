@@ -644,7 +644,27 @@ async def wa7_bad(message: Message): await message.answer("Отправьте и
 
 @router.callback_query(F.data.startswith("weekly_stats:"))
 async def weekly_start(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(client_id=int(callback.data.split(":")[1])); await state.set_state(WeeklyStatsFlow.views); await callback.message.answer("Просмотры за неделю:"); await callback.answer()
+    # Legacy callback: use the same cumulative-account flow as the current
+    # "Обновить статистику" button, so old Telegram cards cannot reset comparisons to zero.
+    cid = int(callback.data.split(":")[1])
+    if not await DB.get_client(cid):
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+    previous = await DB.previous_account_totals(cid)
+    await state.clear()
+    await state.update_data(
+        client_id=cid,
+        previous_total_views=previous["total_views"],
+        previous_threads_followers=previous["threads_followers"],
+        previous_telegram_followers=previous["telegram_followers"],
+    )
+    await state.set_state(WeeklyAnalyticsFlow.total_views)
+    await callback.message.answer(
+        "👀 Текущие общие просмотры аккаунта:\n\n"
+        f"Предыдущее значение: {previous['total_views']:,}\n"
+        "Введите новое число с верхней панели статистики Threads."
+    )
+    await callback.answer()
 
 async def _num(message: Message, state: FSMContext, key: str, next_state, prompt: str):
     try: value = int((message.text or "").replace(" ", ""))
