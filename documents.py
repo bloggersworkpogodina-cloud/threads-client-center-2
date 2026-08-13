@@ -121,7 +121,7 @@ def generate_contract_pdf(client, signer_name: str, settings, output_path: str, 
     )
 
     ps, pe, first_due = period(client["billing_start"], 0)
-    contract_no = f"УСЛ-{client['id']}-{datetime.now().strftime('%Y%m%d')}"
+    contract_no = f"УСЛ-{client['id']}-{ps.strftime('%Y%m%d')}"
     services = _clean_platform_words(client["services"] or "Создание, публикация и аналитика цифрового контента")
     customer_status = _customer_status_label(client["customer_type"])
 
@@ -146,7 +146,7 @@ def generate_contract_pdf(client, signer_name: str, settings, output_path: str, 
 
     story = [
         _p(f"ДОГОВОР № {contract_no}<br/>ВОЗМЕЗДНОГО ОКАЗАНИЯ УСЛУГ", title),
-        _p(f"Дата формирования: {datetime.now().strftime('%d.%m.%Y')}", small),
+        _p(f"Дата договора и начала оказания услуг: {fmt(ps)}", small),
         _p(
             f"{settings.executor_name}, ИНН {settings.executor_inn}, ОГРНИП "
             f"{settings.executor_ogrnip or '—'}, именуемая в дальнейшем «Исполнитель», с одной стороны, "
@@ -244,6 +244,7 @@ def generate_contract_pdf(client, signer_name: str, settings, output_path: str, 
         _p("ПРИЛОЖЕНИЕ № 1. ИНДИВИДУАЛЬНЫЕ УСЛОВИЯ", title),
         _p(f"Перечень услуг: {services}", body),
         _p(f"Стоимость одного расчётного периода: {money(client['service_price'])}", body),
+        _p(f"Дата начала договора и оказания услуг: {fmt(ps)}", body),
         _p(f"Первый расчётный период: {fmt(ps)} — {fmt(pe)}", body),
         _p(f"Дата первого платежа: не позднее {fmt(first_due)}", body),
         _p("Последующие платежи: ежемесячно, не позднее чем за 7 календарных дней до начала очередного расчётного периода.", body),
