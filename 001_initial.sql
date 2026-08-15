@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS daily_posts (
     post_date TEXT NOT NULL,
     slot TEXT,
     body TEXT NOT NULL,
+    image_url TEXT,
     source_row INTEGER,
     sent_at TEXT NOT NULL,
     UNIQUE(client_id, post_date, source_row)
