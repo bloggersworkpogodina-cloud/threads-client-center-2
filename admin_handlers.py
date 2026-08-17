@@ -32,37 +32,90 @@ async def is_admin(user_id: int, router: Router) -> bool:
 
 
 _content_album_tasks = {}
+_content_album_files = {}
 
-async def _album_confirmation(message: Message, state: FSMContext, callback_data: str):
-    await asyncio.sleep(1.2)
+
+async def _finish_content_album(message: Message, state: FSMContext, task_key, callback_data: str):
+    await asyncio.sleep(1.5)
+
+    files = list(_content_album_files.pop(task_key, []))
+    _content_album_tasks.pop(task_key, None)
+    if not files:
+        return
+
+    # Only the last task for the album is allowed to advance the FSM.
+    current = await state.get_state()
+    expected = (
+        BaselineFlow.content_screen.state
+        if callback_data == "baseline_content_done"
+        else WeeklyAnalyticsFlow.content_screen.state
+    )
+    if current != expected:
+        return
+
     data = await state.get_data()
-    files = list(data.get("content_file_ids") or [])
+    existing = list(data.get("content_file_ids") or [])
+    for fid in files:
+        if fid not in existing:
+            existing.append(fid)
+
+    await state.update_data(content_file_ids=existing, content_file_id=existing)
+
+    if callback_data == "baseline_content_done":
+        await state.set_state(BaselineFlow.telegram_screen)
+        skip_callback = "baseline_skip_tg"
+    else:
+        await state.set_state(WeeklyAnalyticsFlow.telegram_screen)
+        skip_callback = "weekly_skip_tg"
+
     await message.answer(
-        f"✅ Альбом загружен. Сохранено фото: {len(files)}.",
-        reply_markup=content_screens_done_kb(callback_data),
+        f"✅ Альбом сохранён. Лучших постов: {len(existing)}.\n\n"
+        "Пришлите скрин Telegram или нажмите «Пропустить»:",
+        reply_markup=skip_photo_kb(skip_callback),
     )
 
+
 async def _store_content_photo(message: Message, state: FSMContext, callback_data: str):
-    data = await state.get_data()
-    files = list(data.get("content_file_ids") or [])
     fid = message.photo[-1].file_id
-    if fid not in files:
-        files.append(fid)
-        await state.update_data(content_file_ids=files)
 
     if message.media_group_id:
-        key = (message.chat.id, message.media_group_id, callback_data)
+        key = (message.chat.id, str(message.media_group_id), callback_data)
+        bucket = _content_album_files.setdefault(key, [])
+        if fid not in bucket:
+            bucket.append(fid)
+
         old = _content_album_tasks.get(key)
         if old and not old.done():
             old.cancel()
+
         _content_album_tasks[key] = asyncio.create_task(
-            _album_confirmation(message, state, callback_data)
+            _finish_content_album(message, state, key, callback_data)
         )
+        return
+
+    # One standalone image is also accepted and advances once.
+    current = await state.get_state()
+    expected = (
+        BaselineFlow.content_screen.state
+        if callback_data == "baseline_content_done"
+        else WeeklyAnalyticsFlow.content_screen.state
+    )
+    if current != expected:
+        return
+
+    await state.update_data(content_file_ids=[fid], content_file_id=[fid])
+    if callback_data == "baseline_content_done":
+        await state.set_state(BaselineFlow.telegram_screen)
+        skip_callback = "baseline_skip_tg"
     else:
-        await message.answer(
-            f"✅ Фото сохранено. Всего: {len(files)}. Можно выбрать несколько фото и отправить их одним альбомом.",
-            reply_markup=content_screens_done_kb(callback_data),
-        )
+        await state.set_state(WeeklyAnalyticsFlow.telegram_screen)
+        skip_callback = "weekly_skip_tg"
+
+    await message.answer(
+        "✅ Фото сохранено.\n\nПришлите скрин Telegram или нажмите «Пропустить»:",
+        reply_markup=skip_photo_kb(skip_callback),
+    )
+
 
 def content_screens_done_kb(callback_data: str):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -689,16 +742,14 @@ async def baseline_total_views(message: Message, state: FSMContext):
 @router.message(BaselineFlow.threads_followers)
 async def baseline_1(message: Message, state: FSMContext): await _analytics_num(message, state,"threads_followers",BaselineFlow.telegram_followers,"Количество подписчиков Telegram (если канала нет — 0):")
 @router.message(BaselineFlow.telegram_followers)
-async def baseline_2(message: Message, state: FSMContext): await _analytics_num(message, state,"telegram_followers",BaselineFlow.weekly_leads,"Среднее количество заявок в неделю:")
-@router.message(BaselineFlow.weekly_leads)
-async def baseline_3(message: Message, state: FSMContext): await _analytics_num(message, state,"weekly_leads",BaselineFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
+async def baseline_2(message: Message, state: FSMContext): await _analytics_num(message, state,"telegram_followers",BaselineFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
 @router.message(BaselineFlow.overview_screen, F.photo)
 async def baseline_4(message: Message, state: FSMContext):
     await state.update_data(overview_file_id=message.photo[-1].file_id, content_file_ids=[])
     await state.set_state(BaselineFlow.content_screen)
     await message.answer(
         "Выберите сразу все скрины лучших постов и отправьте их одним альбомом.\n\n"
-        "Когда загрузите все лучшие посты, нажмите «✅ Все лучшие посты загружены»."
+        "Отправьте их одним альбомом — бот сохранит все фото разом и сам перейдёт дальше."
     )
 @router.message(BaselineFlow.overview_screen)
 async def baseline_4_bad(message: Message): await message.answer("Нужно отправить изображение.")
@@ -727,7 +778,10 @@ async def baseline_5_bad(message: Message):
     await message.answer("Отправьте скрин лучшего поста или нажмите кнопку завершения после загрузки фотографий.")
 
 async def _finish_baseline(message: Message, state: FSMContext, telegram_file_id=None):
-    d=await state.get_data(); d["telegram_file_id"]=telegram_file_id
+    d=await state.get_data()
+    d["telegram_file_id"]=telegram_file_id
+    # Legacy DB compatibility only; applications/leads are no longer part of analytics.
+    d["weekly_leads"]=0
     await DB.save_baseline(d["client_id"],d); await DB.log_event(d["client_id"],"baseline_saved")
     await topic_log(message.bot,DB,SETTINGS.work_group_id,d["client_id"],"🚀 Стартовые показатели клиента зафиксированы.")
     await state.clear(); await message.answer("Стартовые показатели сохранены ✅",reply_markup=admin_menu())
@@ -831,20 +885,18 @@ async def wa2(message: Message, state: FSMContext):
         telegram_followers=current,
         telegram_followers_growth=growth,
     )
-    await state.set_state(WeeklyAnalyticsFlow.applications)
+    await state.set_state(WeeklyAnalyticsFlow.overview_screen)
     await message.answer(
         f"Изменение подписчиков Telegram: {growth:+,} ✅\n\n"
-        "Заявки за неделю:"
+        'Пришлите скрин «Обзор» из статистики Threads:'
     )
-@router.message(WeeklyAnalyticsFlow.applications)
-async def wa4(message: Message, state: FSMContext): await _analytics_num(message, state,"applications",WeeklyAnalyticsFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
 @router.message(WeeklyAnalyticsFlow.overview_screen,F.photo)
 async def wa5(message: Message, state: FSMContext):
     await state.update_data(overview_file_id=message.photo[-1].file_id, content_file_ids=[])
     await state.set_state(WeeklyAnalyticsFlow.content_screen)
     await message.answer(
         "Выберите сразу все скрины лучших постов за неделю и отправьте их одним альбомом.\n\n"
-        "Когда всё загрузите, нажмите «✅ Все лучшие посты загружены»."
+        "Отправьте их одним альбомом — бот сохранит все фото разом и сам перейдёт дальше."
     )
 @router.message(WeeklyAnalyticsFlow.overview_screen)
 async def wa5_bad(message: Message): await message.answer("Нужно отправить изображение.")
@@ -873,7 +925,10 @@ async def wa6_bad(message: Message):
     await message.answer("Отправьте скрин лучшего поста или нажмите кнопку завершения после загрузки фотографий.")
 
 async def _finish_weekly(message:Message,state:FSMContext,telegram_file_id=None):
-    d=await state.get_data(); d["telegram_file_id"]=telegram_file_id
+    d=await state.get_data()
+    d["telegram_file_id"]=telegram_file_id
+    # Legacy DB compatibility only; applications are no longer requested or reported.
+    d["applications"]=0
     today=date.today(); start=today-timedelta(days=today.weekday()); end=start+timedelta(days=6)
     await DB.save_weekly_analytics(d["client_id"],start.isoformat(),end.isoformat(),d); await DB.log_event(d["client_id"],"weekly_analytics_saved",{"week_start":start.isoformat()})
     await topic_log(message.bot,DB,SETTINGS.work_group_id,d["client_id"],"📈 Администратор внёс недельную статистику.")
@@ -887,8 +942,7 @@ async def _finish_weekly(message:Message,state:FSMContext,telegram_file_id=None)
         f"👀 Общие просмотры: {total_views:,}\n"
         f"📈 Просмотры за неделю: +{views_growth:,}\n"
         f"👥 Threads: {d['threads_followers']:,} ({threads_growth:+,})\n"
-        f"📣 Telegram: {d['telegram_followers']:,} ({telegram_growth:+,})\n"
-        f"🎯 Заявки за неделю: {d['applications']:,}",
+        f"📣 Telegram: {d['telegram_followers']:,} ({telegram_growth:+,})",
         reply_markup=admin_menu(),
     )
 @router.message(WeeklyAnalyticsFlow.telegram_screen,F.photo)
