@@ -1,12 +1,13 @@
 from __future__ import annotations
 from datetime import datetime
+import asyncio
 
 from datetime import date, timedelta
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaPhoto
 
-from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow, BaselineFlow, WeeklyAnalyticsFlow, ClientDocsFlow, ClientTermsFlow, ActFlow
+from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow, BaselineFlow, WeeklyAnalyticsFlow, ClientDocsFlow, ClientTermsFlow, ActFlow, BroadcastFlow
 from keyboards import admin_menu, client_card_kb, confirm_client_kb, skip_photo_kb
 from topics import ensure_topic, topic_log
 from documents import generate_contract_pdf, generate_policy_pdf, generate_act_pdf, temp_pdf
@@ -28,6 +29,45 @@ def deps(router: Router):
 
 async def is_admin(user_id: int, router: Router) -> bool:
     return user_id == SETTINGS.admin_id
+
+
+_content_album_tasks = {}
+
+async def _album_confirmation(message: Message, state: FSMContext, callback_data: str):
+    await asyncio.sleep(1.2)
+    data = await state.get_data()
+    files = list(data.get("content_file_ids") or [])
+    await message.answer(
+        f"✅ Альбом загружен. Сохранено фото: {len(files)}.",
+        reply_markup=content_screens_done_kb(callback_data),
+    )
+
+async def _store_content_photo(message: Message, state: FSMContext, callback_data: str):
+    data = await state.get_data()
+    files = list(data.get("content_file_ids") or [])
+    fid = message.photo[-1].file_id
+    if fid not in files:
+        files.append(fid)
+        await state.update_data(content_file_ids=files)
+
+    if message.media_group_id:
+        key = (message.chat.id, message.media_group_id, callback_data)
+        old = _content_album_tasks.get(key)
+        if old and not old.done():
+            old.cancel()
+        _content_album_tasks[key] = asyncio.create_task(
+            _album_confirmation(message, state, callback_data)
+        )
+    else:
+        await message.answer(
+            f"✅ Фото сохранено. Всего: {len(files)}. Можно выбрать несколько фото и отправить их одним альбомом.",
+            reply_markup=content_screens_done_kb(callback_data),
+        )
+
+def content_screens_done_kb(callback_data: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Все лучшие посты загружены", callback_data=callback_data)]
+    ])
 
 
 def card_text(c):
@@ -215,6 +255,124 @@ async def add_edit(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "client_confirm_cancel")
 async def add_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear(); await callback.message.answer("Создание отменено.", reply_markup=admin_menu()); await callback.answer()
+
+
+@router.message(F.text == "📣 Сообщение всем")
+async def broadcast_start(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, router):
+        return
+
+    rows = await DB.list_clients(True)
+    connected = [c for c in rows if c["telegram_id"]]
+    if not connected:
+        await message.answer("Нет активных клиентов с подключённым кабинетом.")
+        return
+
+    await state.clear()
+    await state.set_state(BroadcastFlow.text)
+    await message.answer(
+        f"📣 Сообщение получат <b>{len(connected)}</b> активных клиентов.\n\n"
+        "Отправьте текст рассылки одним сообщением."
+    )
+
+
+@router.message(BroadcastFlow.text)
+async def broadcast_preview(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, router):
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Отправьте текст сообщения.")
+        return
+
+    if len(text) > 4096:
+        await message.answer("Сообщение слишком длинное. Максимум — 4096 символов.")
+        return
+
+    rows = await DB.list_clients(True)
+    connected = [c for c in rows if c["telegram_id"]]
+    if not connected:
+        await state.clear()
+        await message.answer("Нет активных клиентов с подключённым кабинетом.", reply_markup=admin_menu())
+        return
+
+    await state.update_data(broadcast_text=text)
+    await message.answer(
+        f"📣 <b>Предпросмотр рассылки</b>\n\n{text}\n\n"
+        f"Получателей: <b>{len(connected)}</b>.\n"
+        "Отправить всем?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Отправить всем", callback_data="broadcast_confirm")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "broadcast_cancel")
+async def broadcast_cancel(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+
+    await state.clear()
+    await callback.message.answer("Рассылка отменена.", reply_markup=admin_menu())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "broadcast_confirm")
+async def broadcast_confirm(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+
+    data = await state.get_data()
+    text = (data.get("broadcast_text") or "").strip()
+    if not text:
+        await state.clear()
+        await callback.answer("Текст рассылки не найден", show_alert=True)
+        return
+
+    rows = await DB.list_clients(True)
+    connected = [c for c in rows if c["telegram_id"]]
+
+    # Clear first so a repeated callback cannot accidentally reuse the draft.
+    await state.clear()
+    await callback.answer("Отправляю…")
+
+    sent = 0
+    failed = 0
+    failed_names = []
+
+    for client in connected:
+        try:
+            await callback.bot.send_message(
+                chat_id=client["telegram_id"],
+                text=text,
+            )
+            sent += 1
+            try:
+                await DB.log_event(
+                    client["id"],
+                    "broadcast_sent",
+                    {"text": text},
+                )
+            except Exception:
+                pass
+        except Exception:
+            failed += 1
+            failed_names.append(client["name"])
+
+    result = (
+        f"📣 Рассылка завершена.\n\n"
+        f"✅ Отправлено: {sent}\n"
+        f"⚠️ Не доставлено: {failed}"
+    )
+    if failed_names:
+        result += "\n\nНе доставлено:\n" + "\n".join(f"• {name}" for name in failed_names[:20])
+        if len(failed_names) > 20:
+            result += f"\n…и ещё {len(failed_names) - 20}"
+
+    await callback.message.answer(result, reply_markup=admin_menu())
+
 
 @router.message(F.text == "👥 Клиенты")
 async def clients(message: Message):
@@ -536,14 +694,37 @@ async def baseline_2(message: Message, state: FSMContext): await _analytics_num(
 async def baseline_3(message: Message, state: FSMContext): await _analytics_num(message, state,"weekly_leads",BaselineFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
 @router.message(BaselineFlow.overview_screen, F.photo)
 async def baseline_4(message: Message, state: FSMContext):
-    await state.update_data(overview_file_id=message.photo[-1].file_id); await state.set_state(BaselineFlow.content_screen); await message.answer('Пришлите скрин «Контент»:')
+    await state.update_data(overview_file_id=message.photo[-1].file_id, content_file_ids=[])
+    await state.set_state(BaselineFlow.content_screen)
+    await message.answer(
+        "Выберите сразу все скрины лучших постов и отправьте их одним альбомом.\n\n"
+        "Когда загрузите все лучшие посты, нажмите «✅ Все лучшие посты загружены»."
+    )
 @router.message(BaselineFlow.overview_screen)
 async def baseline_4_bad(message: Message): await message.answer("Нужно отправить изображение.")
 @router.message(BaselineFlow.content_screen, F.photo)
 async def baseline_5(message: Message, state: FSMContext):
-    await state.update_data(content_file_id=message.photo[-1].file_id); await state.set_state(BaselineFlow.telegram_screen); await message.answer("Пришлите скрин Telegram или нажмите «Пропустить»:",reply_markup=skip_photo_kb("baseline_skip_tg"))
+    await _store_content_photo(message, state, "baseline_content_done")
+
+@router.callback_query(F.data == "baseline_content_done")
+async def baseline_content_done(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    files = list(data.get("content_file_ids") or [])
+    if not files:
+        await callback.answer("Сначала загрузите хотя бы один скрин.", show_alert=True)
+        return
+    await state.update_data(content_file_id=files)
+    await state.set_state(BaselineFlow.telegram_screen)
+    await callback.message.answer(
+        f"Лучшие посты сохранены: {len(files)} ✅\n\n"
+        "Пришлите скрин Telegram или нажмите «Пропустить»:",
+        reply_markup=skip_photo_kb("baseline_skip_tg"),
+    )
+    await callback.answer()
+
 @router.message(BaselineFlow.content_screen)
-async def baseline_5_bad(message: Message): await message.answer("Нужно отправить изображение.")
+async def baseline_5_bad(message: Message):
+    await message.answer("Отправьте скрин лучшего поста или нажмите кнопку завершения после загрузки фотографий.")
 
 async def _finish_baseline(message: Message, state: FSMContext, telegram_file_id=None):
     d=await state.get_data(); d["telegram_file_id"]=telegram_file_id
@@ -658,13 +839,38 @@ async def wa2(message: Message, state: FSMContext):
 @router.message(WeeklyAnalyticsFlow.applications)
 async def wa4(message: Message, state: FSMContext): await _analytics_num(message, state,"applications",WeeklyAnalyticsFlow.overview_screen,'Пришлите скрин «Обзор» из статистики Threads:')
 @router.message(WeeklyAnalyticsFlow.overview_screen,F.photo)
-async def wa5(message: Message, state: FSMContext): await state.update_data(overview_file_id=message.photo[-1].file_id); await state.set_state(WeeklyAnalyticsFlow.content_screen); await message.answer('Пришлите скрин «Контент»:')
+async def wa5(message: Message, state: FSMContext):
+    await state.update_data(overview_file_id=message.photo[-1].file_id, content_file_ids=[])
+    await state.set_state(WeeklyAnalyticsFlow.content_screen)
+    await message.answer(
+        "Выберите сразу все скрины лучших постов за неделю и отправьте их одним альбомом.\n\n"
+        "Когда всё загрузите, нажмите «✅ Все лучшие посты загружены»."
+    )
 @router.message(WeeklyAnalyticsFlow.overview_screen)
 async def wa5_bad(message: Message): await message.answer("Нужно отправить изображение.")
-@router.message(WeeklyAnalyticsFlow.content_screen,F.photo)
-async def wa6(message: Message, state: FSMContext): await state.update_data(content_file_id=message.photo[-1].file_id); await state.set_state(WeeklyAnalyticsFlow.telegram_screen); await message.answer("Пришлите скрин Telegram или нажмите «Пропустить»:",reply_markup=skip_photo_kb("weekly_skip_tg"))
+@router.message(WeeklyAnalyticsFlow.content_screen, F.photo)
+async def wa6(message: Message, state: FSMContext):
+    await _store_content_photo(message, state, "weekly_content_done")
+
+@router.callback_query(F.data == "weekly_content_done")
+async def weekly_content_done(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    files = list(data.get("content_file_ids") or [])
+    if not files:
+        await callback.answer("Сначала загрузите хотя бы один скрин.", show_alert=True)
+        return
+    await state.update_data(content_file_id=files)
+    await state.set_state(WeeklyAnalyticsFlow.telegram_screen)
+    await callback.message.answer(
+        f"Лучшие посты сохранены: {len(files)} ✅\n\n"
+        "Пришлите скрин Telegram или нажмите «Пропустить»:",
+        reply_markup=skip_photo_kb("weekly_skip_tg"),
+    )
+    await callback.answer()
+
 @router.message(WeeklyAnalyticsFlow.content_screen)
-async def wa6_bad(message: Message): await message.answer("Нужно отправить изображение.")
+async def wa6_bad(message: Message):
+    await message.answer("Отправьте скрин лучшего поста или нажмите кнопку завершения после загрузки фотографий.")
 
 async def _finish_weekly(message:Message,state:FSMContext,telegram_file_id=None):
     d=await state.get_data(); d["telegram_file_id"]=telegram_file_id

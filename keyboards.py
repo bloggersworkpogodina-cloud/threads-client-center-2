@@ -2,7 +2,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 
 
 def admin_menu():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="👥 Клиенты"), KeyboardButton(text="➕ Добавить клиента")], [KeyboardButton(text="📊 Аналитика"), KeyboardButton(text="🗂 Архив")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="👥 Клиенты"), KeyboardButton(text="➕ Добавить клиента")], [KeyboardButton(text="📊 Аналитика"), KeyboardButton(text="🗂 Архив")], [KeyboardButton(text="📣 Сообщение всем")]], resize_keyboard=True)
 
 
 def client_menu():

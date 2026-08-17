@@ -73,3 +73,7 @@ class ActFlow(StatesGroup):
 
 class ActRemarkFlow(StatesGroup):
     text = State()
+
+
+class BroadcastFlow(StatesGroup):
+    text = State()

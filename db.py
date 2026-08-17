@@ -11,6 +11,27 @@ from typing import Any
 import aiosqlite
 
 
+def _encode_file_ids(value) -> str:
+    if isinstance(value, list):
+        return json.dumps([x for x in value if x], ensure_ascii=False)
+    if value:
+        return str(value)
+    return ""
+
+
+def _decode_file_ids(value) -> list[str]:
+    if not value:
+        return []
+    text = str(value)
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(x) for x in parsed if x]
+    except Exception:
+        pass
+    return [text]
+
+
 class Database:
     def __init__(self, path: str, migrations_dir: str | None = None):
         self.path = path
@@ -437,7 +458,7 @@ class Database:
                 """INSERT INTO client_baseline(client_id, total_views, threads_followers, telegram_followers, weekly_leads, overview_file_id, content_file_id, telegram_file_id, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(client_id) DO UPDATE SET total_views=excluded.total_views, threads_followers=excluded.threads_followers, telegram_followers=excluded.telegram_followers, weekly_leads=excluded.weekly_leads, overview_file_id=excluded.overview_file_id, content_file_id=excluded.content_file_id, telegram_file_id=excluded.telegram_file_id, updated_at=excluded.updated_at""",
-                (client_id, data["total_views"], data["threads_followers"], data["telegram_followers"], data["weekly_leads"], data["overview_file_id"], data["content_file_id"], data.get("telegram_file_id"), now, now),
+                (client_id, data["total_views"], data["threads_followers"], data["telegram_followers"], data["weekly_leads"], data["overview_file_id"], _encode_file_ids(data["content_file_id"]), data.get("telegram_file_id"), now, now),
             )
             await conn.commit()
 
@@ -456,7 +477,7 @@ class Database:
                 """INSERT INTO weekly_stats(client_id, week_start, week_end, total_views, views, likes, replies, reposts, quotes, new_followers, telegram_clicks, best_post, manager_comment, created_at, updated_at, threads_followers, telegram_followers, applications, overview_file_id, content_file_id, telegram_file_id)
                 VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(client_id, week_start) DO UPDATE SET week_end=excluded.week_end, total_views=excluded.total_views, views=excluded.views, threads_followers=excluded.threads_followers, telegram_followers=excluded.telegram_followers, applications=excluded.applications, overview_file_id=excluded.overview_file_id, content_file_id=excluded.content_file_id, telegram_file_id=excluded.telegram_file_id, updated_at=excluded.updated_at""",
-                (client_id, week_start, week_end, data["total_views"], data["views"], now, now, data["threads_followers"], data["telegram_followers"], data["applications"], data["overview_file_id"], data["content_file_id"], data.get("telegram_file_id")),
+                (client_id, week_start, week_end, data["total_views"], data["views"], now, now, data["threads_followers"], data["telegram_followers"], data["applications"], data["overview_file_id"], _encode_file_ids(data["content_file_id"]), data.get("telegram_file_id")),
             )
             await conn.commit()
 
@@ -518,9 +539,10 @@ class Database:
         seen: set[str] = set()
 
         def add(file_id, label):
-            if file_id and file_id not in seen:
-                seen.add(file_id)
-                screenshots.append({"file_id": file_id, "label": label})
+            for item in _decode_file_ids(file_id):
+                if item and item not in seen:
+                    seen.add(item)
+                    screenshots.append({"file_id": item, "label": label})
 
         async with self.connect() as conn:
             baseline = await (await conn.execute(
