@@ -513,6 +513,49 @@ class Database:
                 "telegram_followers": 0,
             }
 
+    async def get_client_screenshots(self, client_id: int) -> list[dict[str, str]]:
+        screenshots: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def add(file_id, label):
+            if file_id and file_id not in seen:
+                seen.add(file_id)
+                screenshots.append({"file_id": file_id, "label": label})
+
+        async with self.connect() as conn:
+            baseline = await (await conn.execute(
+                """SELECT overview_file_id, content_file_id, telegram_file_id, created_at
+                   FROM client_baseline
+                   WHERE client_id=?""",
+                (client_id,),
+            )).fetchone()
+
+            if baseline:
+                add(baseline["overview_file_id"], "🚀 Старт проекта — Обзор")
+                add(baseline["content_file_id"], "🚀 Старт проекта — Контент")
+                add(baseline["telegram_file_id"], "🚀 Старт проекта — Telegram")
+
+            rows = await (await conn.execute(
+                """SELECT week_start, week_end, overview_file_id, content_file_id, telegram_file_id
+                   FROM weekly_stats
+                   WHERE client_id=?
+                     AND (
+                        overview_file_id IS NOT NULL
+                        OR content_file_id IS NOT NULL
+                        OR telegram_file_id IS NOT NULL
+                     )
+                   ORDER BY week_start ASC""",
+                (client_id,),
+            )).fetchall()
+
+            for row in rows:
+                period = f"{row['week_start']}–{row['week_end']}"
+                add(row["overview_file_id"], f"📊 {period} — Обзор")
+                add(row["content_file_id"], f"📊 {period} — Контент")
+                add(row["telegram_file_id"], f"📊 {period} — Telegram")
+
+        return screenshots
+
     async def clients_missing_weekly_stats(self, week_start: str):
         async with self.connect() as conn:
             return await (await conn.execute("""SELECT c.* FROM clients c LEFT JOIN weekly_stats w ON w.client_id=c.id AND w.week_start=? WHERE c.is_active=1 AND w.id IS NULL ORDER BY c.name COLLATE NOCASE""", (week_start,))).fetchall()

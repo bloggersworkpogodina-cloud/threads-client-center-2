@@ -4,7 +4,7 @@ from datetime import datetime
 from datetime import date, timedelta
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaPhoto
 
 from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow, BaselineFlow, WeeklyAnalyticsFlow, ClientDocsFlow, ClientTermsFlow, ActFlow
 from keyboards import admin_menu, client_card_kb, confirm_client_kb, skip_photo_kb
@@ -429,6 +429,70 @@ async def client_send_analytics(callback: CallbackQuery):
     )
     await callback.answer("Аналитика отправлена ✅")
 
+@router.callback_query(F.data.startswith("client_screens:"))
+async def client_screens(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+
+    cid = int(callback.data.split(":")[1])
+    client = await DB.get_client(cid)
+    if not client:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+
+    screenshots = await DB.get_client_screenshots(cid)
+    await callback.answer()
+
+    if not screenshots:
+        await callback.message.answer(
+            f"🖼 У клиента «{client['name']}» пока нет сохранённых скринов."
+        )
+        return
+
+    await callback.message.answer(
+        f"🖼 <b>Все сохранённые скрины: {client['name']}</b>\n"
+        f"Всего: {len(screenshots)}"
+    )
+
+    # Telegram media groups support up to 10 items.
+    for offset in range(0, len(screenshots), 10):
+        batch = screenshots[offset:offset + 10]
+        media = [
+            InputMediaPhoto(
+                media=item["file_id"],
+                caption=item["label"],
+            )
+            for item in batch
+        ]
+        try:
+            if len(media) == 1:
+                await callback.bot.send_photo(
+                    callback.message.chat.id,
+                    photo=batch[0]["file_id"],
+                    caption=batch[0]["label"],
+                )
+            else:
+                await callback.bot.send_media_group(
+                    callback.message.chat.id,
+                    media=media,
+                )
+        except Exception:
+            # If one old Telegram file_id is no longer available,
+            # send the remaining screenshots individually so one broken item
+            # does not block the whole archive.
+            for item in batch:
+                try:
+                    await callback.bot.send_photo(
+                        callback.message.chat.id,
+                        photo=item["file_id"],
+                        caption=item["label"],
+                    )
+                except Exception:
+                    await callback.message.answer(
+                        f"⚠️ Не удалось открыть скрин: {item['label']}"
+                    )
+
+
 @router.callback_query(F.data.startswith("client_analytics:"))
 async def analytics(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id, router):
@@ -556,21 +620,14 @@ async def wa1(message: Message, state: FSMContext):
 
     data = await state.get_data()
     previous = int(data.get("previous_threads_followers", 0))
-    if previous and current < previous:
-        await message.answer(
-            f"Новое значение меньше предыдущего ({previous:,}). "
-            "Проверьте число и отправьте ещё раз."
-        )
-        return
-
-    growth = max(current - previous, 0)
+    growth = current - previous
     await state.update_data(
         threads_followers=current,
         threads_followers_growth=growth,
     )
     await state.set_state(WeeklyAnalyticsFlow.telegram_followers)
     await message.answer(
-        f"Прирост подписчиков Threads: +{growth:,} ✅\n\n"
+        f"Изменение подписчиков Threads: {growth:+,} ✅\n\n"
         "Текущее количество подписчиков Telegram (если канала нет — 0):"
     )
 
@@ -588,21 +645,14 @@ async def wa2(message: Message, state: FSMContext):
 
     data = await state.get_data()
     previous = int(data.get("previous_telegram_followers", 0))
-    if previous and current < previous:
-        await message.answer(
-            f"Новое значение меньше предыдущего ({previous:,}). "
-            "Проверьте число и отправьте ещё раз."
-        )
-        return
-
-    growth = max(current - previous, 0)
+    growth = current - previous
     await state.update_data(
         telegram_followers=current,
         telegram_followers_growth=growth,
     )
     await state.set_state(WeeklyAnalyticsFlow.applications)
     await message.answer(
-        f"Прирост подписчиков Telegram: +{growth:,} ✅\n\n"
+        f"Изменение подписчиков Telegram: {growth:+,} ✅\n\n"
         "Заявки за неделю:"
     )
 @router.message(WeeklyAnalyticsFlow.applications)
