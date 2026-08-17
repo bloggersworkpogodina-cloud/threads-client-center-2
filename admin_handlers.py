@@ -43,7 +43,6 @@ async def _finish_content_album(message: Message, state: FSMContext, task_key, c
     if not files:
         return
 
-    # Only the last task for the album is allowed to advance the FSM.
     current = await state.get_state()
     expected = (
         BaselineFlow.content_screen.state
@@ -93,7 +92,6 @@ async def _store_content_photo(message: Message, state: FSMContext, callback_dat
         )
         return
 
-    # One standalone image is also accepted and advances once.
     current = await state.get_state()
     expected = (
         BaselineFlow.content_screen.state
@@ -749,7 +747,7 @@ async def baseline_4(message: Message, state: FSMContext):
     await state.set_state(BaselineFlow.content_screen)
     await message.answer(
         "Выберите сразу все скрины лучших постов и отправьте их одним альбомом.\n\n"
-        "Отправьте их одним альбомом — бот сохранит все фото разом и сам перейдёт дальше."
+        "Когда загрузите все лучшие посты, нажмите «✅ Все лучшие посты загружены»."
     )
 @router.message(BaselineFlow.overview_screen)
 async def baseline_4_bad(message: Message): await message.answer("Нужно отправить изображение.")
@@ -896,7 +894,7 @@ async def wa5(message: Message, state: FSMContext):
     await state.set_state(WeeklyAnalyticsFlow.content_screen)
     await message.answer(
         "Выберите сразу все скрины лучших постов за неделю и отправьте их одним альбомом.\n\n"
-        "Отправьте их одним альбомом — бот сохранит все фото разом и сам перейдёт дальше."
+        "Когда всё загрузите, нажмите «✅ Все лучшие посты загружены»."
     )
 @router.message(WeeklyAnalyticsFlow.overview_screen)
 async def wa5_bad(message: Message): await message.answer("Нужно отправить изображение.")
