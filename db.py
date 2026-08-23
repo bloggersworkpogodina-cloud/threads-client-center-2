@@ -503,26 +503,6 @@ class Database:
 
     async def previous_account_totals(self, client_id: int) -> dict[str, int]:
         async with self.connect() as conn:
-            latest = await (await conn.execute(
-                """SELECT total_views, threads_followers, telegram_followers
-                   FROM weekly_stats
-                   WHERE client_id=?
-                   ORDER BY week_start DESC
-                   LIMIT 1""",
-                (client_id,),
-            )).fetchone()
-
-            # A legacy weekly row may have been created by the old statistics
-            # form without cumulative account values (they were stored as 0).
-            # In that case the first comparison must come from the project
-            # baseline, not from zero.
-            if latest and any(int(latest[k] or 0) > 0 for k in ("total_views", "threads_followers", "telegram_followers")):
-                return {
-                    "total_views": int(latest["total_views"] or 0),
-                    "threads_followers": int(latest["threads_followers"] or 0),
-                    "telegram_followers": int(latest["telegram_followers"] or 0),
-                }
-
             baseline = await (await conn.execute(
                 """SELECT total_views, threads_followers, telegram_followers
                    FROM client_baseline
@@ -530,18 +510,59 @@ class Database:
                 (client_id,),
             )).fetchone()
 
-            if baseline:
-                return {
-                    "total_views": int(baseline["total_views"] or 0),
-                    "threads_followers": int(baseline["threads_followers"] or 0),
-                    "telegram_followers": int(baseline["telegram_followers"] or 0),
-                }
-
-            return {
-                "total_views": 0,
-                "threads_followers": 0,
-                "telegram_followers": 0,
+            result = {
+                "total_views": int(baseline["total_views"] or 0) if baseline else 0,
+                "threads_followers": int(baseline["threads_followers"] or 0) if baseline else 0,
+                "telegram_followers": int(baseline["telegram_followers"] or 0) if baseline else 0,
             }
+
+            # Old weekly rows sometimes contain zeros because cumulative values
+            # were not recorded by the legacy form. Resolve every metric separately
+            # so one valid field cannot force the other fields back to zero.
+            for field in ("total_views", "threads_followers", "telegram_followers"):
+                row = await (await conn.execute(
+                    f"""SELECT {field}
+                        FROM weekly_stats
+                        WHERE client_id=? AND {field} IS NOT NULL AND {field} > 0
+                        ORDER BY week_start DESC
+                        LIMIT 1""",
+                    (client_id,),
+                )).fetchone()
+                if row:
+                    result[field] = int(row[field])
+
+            return result
+
+
+    async def previous_account_totals_before(self, client_id: int, week_start: str) -> dict[str, int]:
+        async with self.connect() as conn:
+            baseline = await (await conn.execute(
+                """SELECT total_views, threads_followers, telegram_followers
+                   FROM client_baseline WHERE client_id=?""",
+                (client_id,),
+            )).fetchone()
+
+            result = {
+                "total_views": int(baseline["total_views"] or 0) if baseline else 0,
+                "threads_followers": int(baseline["threads_followers"] or 0) if baseline else 0,
+                "telegram_followers": int(baseline["telegram_followers"] or 0) if baseline else 0,
+            }
+
+            for field in ("total_views", "threads_followers", "telegram_followers"):
+                row = await (await conn.execute(
+                    f"""SELECT {field}
+                        FROM weekly_stats
+                        WHERE client_id=? AND week_start < ?
+                          AND {field} IS NOT NULL AND {field} > 0
+                        ORDER BY week_start DESC
+                        LIMIT 1""",
+                    (client_id, week_start),
+                )).fetchone()
+                if row:
+                    result[field] = int(row[field])
+
+            return result
+
 
     async def get_client_screenshots(self, client_id: int) -> list[dict[str, str]]:
         screenshots: list[dict[str, str]] = []
