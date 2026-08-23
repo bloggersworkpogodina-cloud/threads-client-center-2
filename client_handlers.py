@@ -651,7 +651,7 @@ async def res3(m:Message,s:FSMContext):
 async def publication(callback:CallbackQuery,state:FSMContext):
     _,status,day=callback.data.split(":"); c=await DB.get_client_by_tg(callback.from_user.id)
     if not c: return
-    a=await DB.analytics(c["id"]); total=max(a["sent"],0)
+    total = await DB.count_posts_for_day(c["id"], day)
     if status=="partial":
         await state.update_data(day=day,total=total,client_id=c["id"]); await state.set_state(PartialPublication.count); await callback.message.answer("Сколько веток опубликовано?"); await callback.answer(); return
     published=total if status=="all" else 0

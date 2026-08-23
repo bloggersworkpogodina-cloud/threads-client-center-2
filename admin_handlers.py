@@ -544,7 +544,6 @@ async def _client_analytics_text(client_id: int) -> str:
             f"(<b>{threads_growth:+,}</b>)"
             f"\n📣 Подписчиков Telegram: <b>{latest['telegram_followers']:,}</b> "
             f"(<b>{telegram_growth:+,}</b>)"
-            f"\n🎯 Заявок за неделю: <b>{latest['applications']:,}</b>"
         )
     elif baseline:
         text += (
@@ -580,7 +579,6 @@ async def _client_analytics_text(client_id: int) -> str:
                 f"\nПросмотры за неделю: +{row['views']:,}"
                 f"\nThreads: {row['threads_followers']:,} ({threads_growth:+,})"
                 f"\nTelegram: {row['telegram_followers']:,} ({telegram_growth:+,})"
-                f"\nЗаявки: {row['applications']:,}"
             )
             previous_threads = int(row["threads_followers"] or 0)
             previous_telegram = int(row["telegram_followers"] or 0)
@@ -1160,7 +1158,7 @@ async def client_act_start(callback: CallbackQuery, state: FSMContext):
         "Напишите, какие услуги фактически указываем в акте.\n\n"
         "Например:\n"
         "1. Подготовка и публикация веток (постов) в Threads.\n"
-        "2. Подготовка и предоставление ежемесячной аналитики."
+        "2. Подготовка и предоставление еженедельной аналитики."
     )
     await callback.answer()
 

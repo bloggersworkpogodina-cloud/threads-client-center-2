@@ -417,6 +417,15 @@ class Database:
             await conn.commit()
             return await (await conn.execute("SELECT * FROM daily_posts WHERE client_id=? AND post_date=? ORDER BY slot", (client_id, post_date))).fetchall()
 
+    async def count_posts_for_day(self, client_id: int, post_date: str) -> int:
+        async with self.connect() as conn:
+            row = await (await conn.execute(
+                "SELECT COUNT(*) AS cnt FROM daily_posts WHERE client_id=? AND post_date=?",
+                (client_id, post_date),
+            )).fetchone()
+            return int(row["cnt"] or 0)
+
+
     async def posts_sent(self, client_id: int, post_date: str) -> bool:
         async with self.connect() as conn:
             row = await (await conn.execute("SELECT 1 FROM daily_posts WHERE client_id=? AND post_date=? LIMIT 1", (client_id, post_date))).fetchone()
@@ -612,10 +621,21 @@ class Database:
 
     async def act_results(self, client_id: int, period_start: str, period_end: str) -> dict[str, int]:
         async with self.connect() as conn:
-            publication = await (await conn.execute(
-                """SELECT COALESCE(SUM(published_posts), 0) AS published
-                   FROM publication_confirmations
-                   WHERE client_id=? AND confirmation_date BETWEEN ? AND ?""",
+            # Count only the content rows that belong to THIS billing period.
+            # daily_posts contains one row per prepared/sent post and therefore
+            # cannot inflate because of cumulative publication confirmations.
+            posts_row = await (await conn.execute(
+                """SELECT COUNT(*) AS cnt
+                   FROM daily_posts
+                   WHERE client_id=? AND post_date BETWEEN ? AND ?""",
+                (client_id, period_start, period_end),
+            )).fetchone()
+
+            # One weekly_stats row = one weekly analytics report.
+            analytics_row = await (await conn.execute(
+                """SELECT COUNT(*) AS cnt
+                   FROM weekly_stats
+                   WHERE client_id=? AND week_end >= ? AND week_start <= ?""",
                 (client_id, period_start, period_end),
             )).fetchone()
 
@@ -634,13 +654,24 @@ class Database:
             if rows:
                 first = rows[0]
                 last = rows[-1]
-                first_views = int(baseline["total_views"] or 0) if baseline else max(int(first["total_views"] or 0) - int(first["views"] or 0), 0)
+
+                # The period should start from the value before the first weekly
+                # update whenever it can be reconstructed from that week's growth.
+                first_total = int(first["total_views"] or 0)
+                first_growth = int(first["views"] or 0)
+                reconstructed_views = max(first_total - first_growth, 0)
+
+                baseline_views = int(baseline["total_views"] or 0) if baseline else 0
+                first_views = reconstructed_views if reconstructed_views > 0 else baseline_views
+
+                # Followers are cumulative values. Prefer baseline for the first
+                # period; otherwise use the first recorded weekly total.
                 first_threads = int(baseline["threads_followers"] or 0) if baseline else int(first["threads_followers"] or 0)
                 first_telegram = int(baseline["telegram_followers"] or 0) if baseline else int(first["telegram_followers"] or 0)
+
                 end_views = int(last["total_views"] or 0)
                 end_threads = int(last["threads_followers"] or 0)
                 end_telegram = int(last["telegram_followers"] or 0)
-                applications = sum(int(row["applications"] or 0) for row in rows)
             else:
                 first_views = int(baseline["total_views"] or 0) if baseline else 0
                 first_threads = int(baseline["threads_followers"] or 0) if baseline else 0
@@ -648,11 +679,10 @@ class Database:
                 end_views = first_views
                 end_threads = first_threads
                 end_telegram = first_telegram
-                applications = 0
 
             return {
-                "published_posts": int(publication["published"] or 0),
-                "analytics_count": 1,
+                "published_posts": int(posts_row["cnt"] or 0),
+                "analytics_count": int(analytics_row["cnt"] or 0),
                 "views_start": first_views,
                 "views_end": end_views,
                 "views_growth": end_views - first_views,
@@ -662,8 +692,8 @@ class Database:
                 "telegram_start": first_telegram,
                 "telegram_end": end_telegram,
                 "telegram_growth": end_telegram - first_telegram,
-                "applications": applications,
             }
+
 
     async def save_service_act(
         self,

@@ -397,15 +397,14 @@ def generate_act_pdf(
         _p(act["services_text"], body),
         _p("2. Результаты за расчётный период", h),
         _p(
-            f"Опубликовано веток (постов): {results.get('published_posts', 0)}\n"
+            f"Подготовлено и опубликовано/передано публикаций: {results.get('published_posts', 0)}\n"
             f"Подготовлено и предоставлено аналитических отчётов: {results.get('analytics_count', 1)}\n\n"
             f"Общие просмотры аккаунта: {results.get('views_start', 0):,} → {results.get('views_end', 0):,} "
             f"({results.get('views_growth', 0):+,})\n"
             f"Подписчики Threads: {results.get('threads_start', 0):,} → {results.get('threads_end', 0):,} "
             f"({results.get('threads_growth', 0):+,})\n"
             f"Подписчики Telegram: {results.get('telegram_start', 0):,} → {results.get('telegram_end', 0):,} "
-            f"({results.get('telegram_growth', 0):+,})\n"
-            f"Заявки за период: {results.get('applications', 0):,}",
+            f"({results.get('telegram_growth', 0):+,})\n",
             body,
         ),
         _p("3. Стоимость услуг", h),
