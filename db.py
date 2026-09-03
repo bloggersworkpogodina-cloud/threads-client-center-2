@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import secrets
-from datetime import date, datetime
+from datetime import datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -210,6 +209,14 @@ class Database:
             contract_accepted_at TEXT,
             pd_consent_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS weekly_content_status (
+            client_id INTEGER NOT NULL REFERENCES clients(id),
+            week_start TEXT NOT NULL,
+            content_done_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(client_id, week_start)
+        );
         """
         async with self.connect() as conn:
             await conn.executescript(schema)
@@ -282,6 +289,7 @@ class Database:
             required = {
                 "clients", "daily_posts", "publication_confirmations",
                 "client_results", "weekly_stats", "client_baseline", "service_acts", "client_events", "client_consents",
+                "weekly_content_status",
             }
             rows = await (await conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
@@ -528,6 +536,35 @@ class Database:
                 "SELECT * FROM weekly_stats WHERE client_id=? ORDER BY week_start DESC LIMIT ?",
                 (client_id, limit),
             )).fetchall()
+
+    async def has_weekly_stats(self, client_id: int, week_start: str) -> bool:
+        async with self.connect() as conn:
+            row = await (await conn.execute(
+                "SELECT 1 FROM weekly_stats WHERE client_id=? AND week_start=? LIMIT 1",
+                (client_id, week_start),
+            )).fetchone()
+            return bool(row)
+
+    async def weekly_content_done(self, client_id: int, week_start: str) -> bool:
+        async with self.connect() as conn:
+            row = await (await conn.execute(
+                "SELECT 1 FROM weekly_content_status WHERE client_id=? AND week_start=? LIMIT 1",
+                (client_id, week_start),
+            )).fetchone()
+            return bool(row)
+
+    async def mark_weekly_content_done(self, client_id: int, week_start: str) -> None:
+        now = datetime.utcnow().isoformat()
+        async with self.connect() as conn:
+            await conn.execute(
+                """INSERT INTO weekly_content_status(client_id, week_start, content_done_at, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(client_id, week_start) DO UPDATE SET
+                       content_done_at=excluded.content_done_at,
+                       updated_at=excluded.updated_at""",
+                (client_id, week_start, now, now),
+            )
+            await conn.commit()
 
     async def previous_total_views(self, client_id: int) -> int:
         totals = await self.previous_account_totals(client_id)

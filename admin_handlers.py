@@ -11,9 +11,18 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from states import AddClient, LinkPlan, LinkSheet, WeeklyStatsFlow, BaselineFlow, WeeklyAnalyticsFlow, ClientDocsFlow, ClientTermsFlow, ActFlow, BroadcastFlow
 from keyboards import admin_menu, client_card_kb, confirm_client_kb, skip_photo_kb
 from topics import ensure_topic, topic_log
-from documents import generate_contract_pdf, generate_policy_pdf, generate_act_pdf, temp_pdf
+from documents import generate_contract_pdf, generate_act_pdf, temp_pdf
 from billing import period, fmt, latest_completed_period
 from posts import send_today_posts
+from weekly_workflow import (
+    analytics_week_for,
+    content_week_for,
+    current_content_week,
+    parse_week_start,
+    period_text,
+    send_content_question,
+    send_next_monday_task,
+)
 
 router = Router()
 DB = None
@@ -215,6 +224,21 @@ async def analytics_clients(message: Message, state: FSMContext):
         for c in rows
     ])
     await message.answer("📊 Выберите клиента:", reply_markup=kb)
+
+
+@router.message(F.text == "🗓 План понедельника")
+async def monday_plan(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, router):
+        return
+    await state.clear()
+    week_start = current_content_week(SETTINGS)
+    week_end = week_start + timedelta(days=6)
+    await message.answer(
+        "🗓 <b>Аналитика → контент</b>\n\n"
+        f"Бот проведёт тебя по всем клиентам по очереди и соберёт контент "
+        f"на неделю {period_text(week_start, week_end)}."
+    )
+    await send_next_monday_task(message.bot, DB, SETTINGS, week_start)
 
 
 @router.message(F.text == "📣 Сообщение всем")
@@ -963,19 +987,31 @@ async def baseline_skip(callback: CallbackQuery,state:FSMContext):
 @router.message(BaselineFlow.telegram_screen)
 async def baseline_6_bad(message: Message): await message.answer("Отправьте изображение или нажмите «Пропустить».",reply_markup=skip_photo_kb("baseline_skip_tg"))
 
-@router.callback_query(F.data.startswith("weekly_analytics:"))
-async def weekly_analytics_start(callback: CallbackQuery,state:FSMContext):
-    if not await is_admin(callback.from_user.id, router): return
-    cid=int(callback.data.split(":")[1])
-    if not await DB.get_client(cid): await callback.answer("Клиент не найден",show_alert=True); return
+async def _begin_weekly_analytics(
+    callback: CallbackQuery,
+    state: FSMContext,
+    cid: int,
+    workflow_week_start: date | None = None,
+) -> None:
+    if not await DB.get_client(cid):
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
     previous = await DB.previous_account_totals(cid)
     await state.clear()
-    await state.update_data(
+    state_data = dict(
         client_id=cid,
         previous_total_views=previous["total_views"],
         previous_threads_followers=previous["threads_followers"],
         previous_telegram_followers=previous["telegram_followers"],
     )
+    if workflow_week_start:
+        analytics_start, analytics_end = analytics_week_for(workflow_week_start)
+        state_data.update(
+            monday_workflow_week=workflow_week_start.isoformat(),
+            analytics_week_start=analytics_start.isoformat(),
+            analytics_week_end=analytics_end.isoformat(),
+        )
+    await state.update_data(**state_data)
     await state.set_state(WeeklyAnalyticsFlow.total_views)
     await callback.message.answer(
         "👀 Текущие общие просмотры аккаунта:\n\n"
@@ -983,6 +1019,29 @@ async def weekly_analytics_start(callback: CallbackQuery,state:FSMContext):
         "Введите новое число с верхней панели статистики Threads."
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("weekly_analytics:"))
+async def weekly_analytics_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    await _begin_weekly_analytics(callback, state, cid)
+
+
+@router.callback_query(F.data.startswith("monday_stats:"))
+async def monday_stats_start(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    _, cid_raw, week_raw = callback.data.split(":", 2)
+    try:
+        week_start = parse_week_start(week_raw)
+    except ValueError:
+        await callback.answer("Дата задачи повреждена. Запустите план заново.", show_alert=True)
+        return
+    await _begin_weekly_analytics(callback, state, int(cid_raw), week_start)
+
+
 @router.message(WeeklyAnalyticsFlow.total_views)
 async def weekly_total_views(message: Message, state: FSMContext):
     try:
@@ -1091,7 +1150,14 @@ async def _finish_weekly(message:Message,state:FSMContext,telegram_file_id=None)
     d["telegram_file_id"]=telegram_file_id
     # Legacy DB compatibility only; applications are no longer requested or reported.
     d["applications"]=0
-    today=date.today(); start=today-timedelta(days=today.weekday()); end=start+timedelta(days=6)
+    if d.get("analytics_week_start") and d.get("analytics_week_end"):
+        start = date.fromisoformat(d["analytics_week_start"])
+        end = date.fromisoformat(d["analytics_week_end"])
+    else:
+        today = datetime.now(SETTINGS.tz).date()
+        start = today - timedelta(days=today.weekday())
+        end = start + timedelta(days=6)
+    workflow_week_raw = d.get("monday_workflow_week")
     await DB.save_weekly_analytics(d["client_id"],start.isoformat(),end.isoformat(),d); await DB.log_event(d["client_id"],"weekly_analytics_saved",{"week_start":start.isoformat()})
     await topic_log(message.bot,DB,SETTINGS.work_group_id,d["client_id"],"📈 Администратор внёс недельную статистику.")
     views_growth = int(d.get("views", 0))
@@ -1107,6 +1173,14 @@ async def _finish_weekly(message:Message,state:FSMContext,telegram_file_id=None)
         f"📣 Telegram: {d['telegram_followers']:,} ({telegram_growth:+,})",
         reply_markup=admin_menu(),
     )
+    if workflow_week_raw:
+        await send_content_question(
+            message.bot,
+            DB,
+            SETTINGS,
+            d["client_id"],
+            parse_week_start(workflow_week_raw),
+        )
 @router.message(WeeklyAnalyticsFlow.telegram_screen,F.photo)
 async def wa7(message: Message, state: FSMContext): await _finish_weekly(message, state, message.photo[-1].file_id)
 @router.callback_query(F.data=="weekly_skip_tg")
@@ -1114,29 +1188,54 @@ async def weekly_skip(callback:CallbackQuery,state:FSMContext): await _finish_we
 @router.message(WeeklyAnalyticsFlow.telegram_screen)
 async def wa7_bad(message: Message): await message.answer("Отправьте изображение или нажмите «Пропустить».",reply_markup=skip_photo_kb("weekly_skip_tg"))
 
+
+@router.callback_query(F.data.startswith("monday_content_yes:"))
+async def monday_content_yes(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    _, cid_raw, week_raw = callback.data.split(":", 2)
+    try:
+        cid = int(cid_raw)
+        week_start = parse_week_start(week_raw)
+    except ValueError:
+        await callback.answer("Задача повреждена. Запустите план заново.", show_alert=True)
+        return
+    if await DB.weekly_content_done(cid, week_start.isoformat()):
+        await callback.answer("Уже отмечено ✅")
+        return
+    client = await DB.get_client(cid)
+    if not client:
+        await callback.answer("Клиент не найден.", show_alert=True)
+        return
+    await DB.mark_weekly_content_done(cid, week_start.isoformat())
+    content_start, content_end = content_week_for(week_start)
+    await DB.log_event(cid, "weekly_content_done", {"week_start": week_start.isoformat()})
+    await topic_log(
+        callback.bot,
+        DB,
+        SETTINGS.work_group_id,
+        cid,
+        f"✅ Контент на неделю {period_text(content_start, content_end)} подготовлен.",
+    )
+    await callback.answer("Контент отмечен ✅")
+    await callback.message.answer(f"✅ <b>{client['name']}</b>: контент готов. Перехожу к следующему клиенту.")
+    await send_next_monday_task(callback.bot, DB, SETTINGS, week_start)
+
+
+@router.callback_query(F.data.startswith("monday_content_no:"))
+async def monday_content_no(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    await callback.answer("Не переключаюсь. Закончи контент и нажми «Да».", show_alert=True)
+
 @router.callback_query(F.data.startswith("weekly_stats:"))
 async def weekly_start(callback: CallbackQuery, state: FSMContext):
     # Legacy callback: use the same cumulative-account flow as the current
     # "Обновить статистику" button, so old Telegram cards cannot reset comparisons to zero.
-    cid = int(callback.data.split(":")[1])
-    if not await DB.get_client(cid):
-        await callback.answer("Клиент не найден", show_alert=True)
+    if not await is_admin(callback.from_user.id, router):
         return
-    previous = await DB.previous_account_totals(cid)
-    await state.clear()
-    await state.update_data(
-        client_id=cid,
-        previous_total_views=previous["total_views"],
-        previous_threads_followers=previous["threads_followers"],
-        previous_telegram_followers=previous["telegram_followers"],
-    )
-    await state.set_state(WeeklyAnalyticsFlow.total_views)
-    await callback.message.answer(
-        "👀 Текущие общие просмотры аккаунта:\n\n"
-        f"Предыдущее значение: {previous['total_views']:,}\n"
-        "Введите новое число с верхней панели статистики Threads."
-    )
-    await callback.answer()
+    cid = int(callback.data.split(":")[1])
+    await _begin_weekly_analytics(callback, state, cid)
 
 async def _num(message: Message, state: FSMContext, key: str, next_state, prompt: str):
     try: value = int((message.text or "").replace(" ", ""))

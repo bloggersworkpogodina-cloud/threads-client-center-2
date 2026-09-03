@@ -15,6 +15,7 @@ class Settings:
     timezone: str
     daily_send_hour: int
     confirmation_hour: int
+    monday_workflow_hour: int
     google_service_account_json: str | None
     executor_name: str
     executor_inn: str
@@ -46,6 +47,7 @@ def load_settings() -> Settings:
         timezone=os.getenv("TIMEZONE", "Europe/Moscow").strip(),
         daily_send_hour=int(os.getenv("DAILY_SEND_HOUR", "8")),
         confirmation_hour=int(os.getenv("CONFIRMATION_HOUR", "20")),
+        monday_workflow_hour=int(os.getenv("MONDAY_WORKFLOW_HOUR", "10")),
         google_service_account_json=google_json,
         executor_name=os.getenv("EXECUTOR_NAME", "ИП Погодина Анастасия Александровна").strip(),
         executor_inn=os.getenv("EXECUTOR_INN", "526333028306").strip(),

@@ -77,3 +77,11 @@ CREATE TABLE IF NOT EXISTS client_events (
     payload_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS weekly_content_status (
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    week_start TEXT NOT NULL,
+    content_done_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(client_id, week_start)
+);

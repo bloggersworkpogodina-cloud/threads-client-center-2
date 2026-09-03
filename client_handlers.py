@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 import re
-from aiogram import Bot, F, Router
+from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
