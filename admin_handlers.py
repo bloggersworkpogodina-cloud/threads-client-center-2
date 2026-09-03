@@ -4,6 +4,7 @@ import asyncio
 
 from datetime import date, timedelta
 from aiogram import Bot, F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, InputMediaPhoto
 
@@ -139,6 +140,101 @@ def card_text(c):
             f"Кабинет: {'подключён' if c['telegram_id'] else 'не подключён'}\n"
             f"Контент-план: {'подключён' if c['sheet_url'] else 'не подключён'}\n"
             f"Документы: {'✅ загружены' if c['contract_file_id'] and c['policy_file_id'] else '⏳ не загружены'}\nТема: {'создана' if c['topic_id'] else 'не создана'}\nСтатус: {'активен' if c['is_active'] else 'архив'}")
+
+
+async def _show_active_clients(message: Message) -> None:
+    rows = await DB.list_clients(True)
+    if not rows:
+        await message.answer("Активных клиентов пока нет.", reply_markup=admin_menu())
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=c["name"], callback_data=f"client_view:{c['id']}")]
+        for c in rows
+    ])
+    await message.answer("Активные клиенты:", reply_markup=kb)
+
+
+async def _show_archived_clients(message: Message) -> None:
+    rows = [c for c in await DB.list_clients(False) if not c["is_active"]]
+    if not rows:
+        await message.answer("Архив пуст.", reply_markup=admin_menu())
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=c["name"], callback_data=f"archive_view:{c['id']}")]
+        for c in rows
+    ])
+    await message.answer("🗂 Клиенты в архиве:", reply_markup=kb)
+
+
+def _archived_client_kb(client_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="♻️ Восстановить клиента", callback_data=f"client_restore:{client_id}")],
+        [
+            InlineKeyboardButton(text="📊 История роста", callback_data=f"client_analytics:{client_id}"),
+            InlineKeyboardButton(text="🖼 Скрины клиента", callback_data=f"client_screens:{client_id}"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад в архив", callback_data="archive_list")],
+    ])
+
+
+@router.message(Command("admin", "cancel"))
+async def admin_home(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, router):
+        return
+    await state.clear()
+    await message.answer("Админ-центр Threads Client Center 2.0", reply_markup=admin_menu())
+
+
+@router.message(F.text == "👥 Клиенты")
+async def clients(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, router):
+        return
+    await state.clear()
+    await _show_active_clients(message)
+
+
+@router.message(F.text == "🗂 Архив")
+async def archived_clients(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, router):
+        return
+    await state.clear()
+    await _show_archived_clients(message)
+
+
+@router.message(F.text == "📊 Аналитика")
+async def analytics_clients(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, router):
+        return
+    await state.clear()
+    rows = await DB.list_clients(True)
+    if not rows:
+        await message.answer("Активных клиентов пока нет.", reply_markup=admin_menu())
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=c["name"], callback_data=f"client_analytics:{c['id']}")]
+        for c in rows
+    ])
+    await message.answer("📊 Выберите клиента:", reply_markup=kb)
+
+
+@router.message(F.text == "📣 Сообщение всем")
+async def broadcast_start(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id, router):
+        return
+
+    rows = await DB.list_clients(True)
+    connected = [c for c in rows if c["telegram_id"]]
+    if not connected:
+        await state.clear()
+        await message.answer("Нет активных клиентов с подключённым кабинетом.", reply_markup=admin_menu())
+        return
+
+    await state.clear()
+    await state.set_state(BroadcastFlow.text)
+    await message.answer(
+        f"📣 Сообщение получат <b>{len(connected)}</b> активных клиентов.\n\n"
+        "Отправьте текст рассылки одним сообщением."
+    )
 
 @router.message(F.text == "➕ Добавить клиента")
 async def add_start(message: Message, state: FSMContext):
@@ -308,25 +404,6 @@ async def add_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear(); await callback.message.answer("Создание отменено.", reply_markup=admin_menu()); await callback.answer()
 
 
-@router.message(F.text == "📣 Сообщение всем")
-async def broadcast_start(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id, router):
-        return
-
-    rows = await DB.list_clients(True)
-    connected = [c for c in rows if c["telegram_id"]]
-    if not connected:
-        await message.answer("Нет активных клиентов с подключённым кабинетом.")
-        return
-
-    await state.clear()
-    await state.set_state(BroadcastFlow.text)
-    await message.answer(
-        f"📣 Сообщение получат <b>{len(connected)}</b> активных клиентов.\n\n"
-        "Отправьте текст рассылки одним сообщением."
-    )
-
-
 @router.message(BroadcastFlow.text)
 async def broadcast_preview(message: Message, state: FSMContext):
     if not await is_admin(message.from_user.id, router):
@@ -425,21 +502,20 @@ async def broadcast_confirm(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(result, reply_markup=admin_menu())
 
 
-@router.message(F.text == "👥 Клиенты")
-async def clients(message: Message):
-    if not await is_admin(message.from_user.id, router): return
-    rows = await DB.list_clients(True)
-    if not rows: await message.answer("Активных клиентов пока нет."); return
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=c["name"], callback_data=f"client_view:{c['id']}")] for c in rows])
-    await message.answer("Активные клиенты:", reply_markup=kb)
-
 @router.callback_query(F.data.startswith("client_view:"))
 async def view_client(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
     c = await DB.get_client(int(callback.data.split(":")[1]))
     if not c:
         await callback.answer("Карточка устарела. Обновите список клиентов.", show_alert=True)
         return
-    await callback.message.answer(card_text(c), reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id))
+    reply_markup = (
+        client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id)
+        if c["is_active"]
+        else _archived_client_kb(c["id"])
+    )
+    await callback.message.answer(card_text(c), reply_markup=reply_markup)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("client_invite:"))
@@ -518,7 +594,102 @@ async def plan_save(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("client_archive:"))
 async def archive(callback: CallbackQuery):
-    cid = int(callback.data.split(":")[1]); await DB.archive_client(cid); await DB.log_event(cid, "client_archived"); await callback.message.answer("Клиент перемещён в архив.", reply_markup=admin_menu()); await callback.answer()
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if not c or not c["is_active"]:
+        await callback.answer("Клиент уже в архиве или не найден.", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔴 Да, переместить в архив", callback_data=f"client_archive_confirm:{cid}")],
+        [InlineKeyboardButton(text="Отмена", callback_data=f"client_archive_cancel:{cid}")],
+    ])
+    await callback.message.answer(
+        f"Переместить клиента <b>{c['name']}</b> в архив?\n\n"
+        "История и данные сохранятся, клиента можно будет восстановить.",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("client_archive_confirm:"))
+async def archive_confirm(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if not c:
+        await callback.answer("Клиент не найден.", show_alert=True)
+        return
+    await DB.archive_client(cid)
+    await DB.log_event(cid, "client_archived")
+    await callback.message.answer(
+        f"Клиент <b>{c['name']}</b> перемещён в архив.\n"
+        "Чтобы вернуть его: 🗂 Архив → клиент → ♻️ Восстановить.",
+        reply_markup=admin_menu(),
+    )
+    await callback.answer("Перемещён в архив")
+
+
+@router.callback_query(F.data.startswith("client_archive_cancel:"))
+async def archive_cancel(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if c:
+        await callback.message.answer(
+            "Архивация отменена.",
+            reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id),
+        )
+    await callback.answer("Отменено")
+
+
+@router.callback_query(F.data == "archive_list")
+async def archive_list(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    await state.clear()
+    await _show_archived_clients(callback.message)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("archive_view:"))
+async def archive_view(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    c = await DB.get_client(cid)
+    if not c:
+        await callback.answer("Клиент не найден.", show_alert=True)
+        return
+    if c["is_active"]:
+        await callback.message.answer(
+            card_text(c),
+            reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id),
+        )
+    else:
+        await callback.message.answer(card_text(c), reply_markup=_archived_client_kb(cid))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("client_restore:"))
+async def restore_client(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    cid = int(callback.data.split(":")[1])
+    try:
+        c = await DB.restore_client(cid)
+    except (LookupError, ValueError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await DB.log_event(cid, "client_restored")
+    await callback.message.answer(
+        f"Клиент <b>{c['name']}</b> восстановлен ✅",
+        reply_markup=client_card_kb(c["id"], c["topic_id"], SETTINGS.work_group_id),
+    )
+    await callback.answer("Клиент восстановлен ✅")
 
 
 

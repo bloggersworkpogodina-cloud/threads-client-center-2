@@ -399,8 +399,40 @@ class Database:
 
     async def archive_client(self, client_id: int):
         async with self.connect() as conn:
-            await conn.execute("UPDATE clients SET is_active = 0, updated_at = ? WHERE id = ?", (datetime.utcnow().isoformat(), client_id))
+            cur = await conn.execute(
+                "UPDATE clients SET is_active = 0, updated_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(), client_id),
+            )
+            if cur.rowcount == 0:
+                await conn.rollback()
+                raise LookupError("Клиент не найден")
             await conn.commit()
+
+    async def restore_client(self, client_id: int):
+        async with self.connect() as conn:
+            row = await (await conn.execute(
+                "SELECT * FROM clients WHERE id = ?",
+                (client_id,),
+            )).fetchone()
+            if not row:
+                raise LookupError("Клиент не найден")
+            if row["is_active"]:
+                return row
+            try:
+                await conn.execute(
+                    "UPDATE clients SET is_active = 1, updated_at = ? WHERE id = ?",
+                    (datetime.utcnow().isoformat(), client_id),
+                )
+                await conn.commit()
+            except aiosqlite.IntegrityError as exc:
+                await conn.rollback()
+                raise ValueError(
+                    "Нельзя восстановить: уже есть активный клиент с таким Threads username"
+                ) from exc
+            return await (await conn.execute(
+                "SELECT * FROM clients WHERE id = ?",
+                (client_id,),
+            )).fetchone()
 
     async def save_posts(self, client_id: int, post_date: str, posts: list[dict[str, str]]) -> list[aiosqlite.Row]:
         async with self.connect() as conn:

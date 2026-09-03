@@ -15,6 +15,7 @@ async def main() -> None:
         await db.migrate()
         client = await db.create_client("Тест", "@analytics_test", "@tester")
         await db.save_baseline(client["id"], {
+            "total_views": 5000,
             "threads_followers": 100,
             "telegram_followers": 20,
             "weekly_leads": 2,
@@ -26,9 +27,10 @@ async def main() -> None:
         start = today - timedelta(days=today.weekday())
         end = start + timedelta(days=6)
         await db.save_weekly_analytics(client["id"], start.isoformat(), end.isoformat(), {
+            "total_views": 6000,
+            "views": 1000,
             "threads_followers": 120,
             "telegram_followers": 25,
-            "views": 1000,
             "applications": 4,
             "overview_file_id": "weekly_overview",
             "content_file_id": "weekly_content",
@@ -37,6 +39,11 @@ async def main() -> None:
         analytics = await db.analytics(client["id"])
         assert analytics["baseline"]["threads_followers"] == 100
         assert analytics["latest"]["threads_followers"] == 120
+        await db.archive_client(client["id"])
+        archived = await db.get_client(client["id"])
+        assert archived["is_active"] == 0
+        restored = await db.restore_client(client["id"])
+        assert restored["is_active"] == 1
         await db.migrate()
         assert await db.get_client(client["id"])
         print("ANALYTICS SMOKE TEST: OK")
