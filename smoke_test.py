@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from db import Database
+from admin_handlers import _means_no_posts, content_screens_done_kb
 from weekly_workflow import send_next_monday_task
 
 
@@ -20,6 +21,11 @@ class FakeBot:
 
 
 async def main() -> None:
+    assert all(_means_no_posts(value) for value in ("0", "нет", "Нет постов", "постов не было"))
+    assert not _means_no_posts("есть посты")
+    no_posts_keyboard = content_screens_done_kb("done", "no_posts")
+    assert no_posts_keyboard.inline_keyboard[1][0].callback_data == "no_posts"
+
     path = tempfile.mktemp(suffix=".db")
     try:
         db = Database(path)

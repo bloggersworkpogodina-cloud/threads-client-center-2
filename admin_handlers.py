@@ -125,10 +125,36 @@ async def _store_content_photo(message: Message, state: FSMContext, callback_dat
     )
 
 
-def content_screens_done_kb(callback_data: str):
+def content_screens_done_kb(callback_data: str, no_posts_callback: str):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Все лучшие посты загружены", callback_data=callback_data)]
+        [InlineKeyboardButton(text="✅ Все лучшие посты загружены", callback_data=callback_data)],
+        [InlineKeyboardButton(text="🚫 Постов не было", callback_data=no_posts_callback)],
     ])
+
+
+def _means_no_posts(value: str | None) -> bool:
+    normalized = " ".join((value or "").strip().lower().replace("ё", "е").split())
+    return normalized in {"0", "нет", "не было", "нет постов", "постов не было"}
+
+
+async def _continue_without_best_posts(
+    message: Message,
+    state: FSMContext,
+    *,
+    baseline: bool,
+) -> None:
+    await state.update_data(content_file_ids=[], content_file_id=[])
+    if baseline:
+        await state.set_state(BaselineFlow.telegram_screen)
+        skip_callback = "baseline_skip_tg"
+    else:
+        await state.set_state(WeeklyAnalyticsFlow.telegram_screen)
+        skip_callback = "weekly_skip_tg"
+    await message.answer(
+        "Отметила: постов за этот период не было ✅\n\n"
+        "Пришлите скрин Telegram или нажмите «Пропустить»: ",
+        reply_markup=skip_photo_kb(skip_callback),
+    )
 
 
 def card_text(c):
@@ -942,7 +968,9 @@ async def baseline_4(message: Message, state: FSMContext):
     await state.set_state(BaselineFlow.content_screen)
     await message.answer(
         "Выберите сразу все скрины лучших постов и отправьте их одним альбомом.\n\n"
-        "Когда загрузите все лучшие посты, нажмите «✅ Все лучшие посты загружены»."
+        "Когда загрузите все лучшие посты, нажмите «✅ Все лучшие посты загружены».\n"
+        "Если публикаций ещё не было, нажмите «🚫 Постов не было».",
+        reply_markup=content_screens_done_kb("baseline_content_done", "baseline_no_posts"),
     )
 @router.message(BaselineFlow.overview_screen)
 async def baseline_4_bad(message: Message): await message.answer("Нужно отправить изображение.")
@@ -966,9 +994,28 @@ async def baseline_content_done(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
+@router.callback_query(F.data == "baseline_no_posts")
+async def baseline_no_posts(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    if await state.get_state() != BaselineFlow.content_screen.state:
+        await callback.answer("Этот шаг уже завершён.", show_alert=True)
+        return
+    await _continue_without_best_posts(callback.message, state, baseline=True)
+    await callback.answer("Отмечено: постов не было")
+
+
 @router.message(BaselineFlow.content_screen)
-async def baseline_5_bad(message: Message):
-    await message.answer("Отправьте скрин лучшего поста или нажмите кнопку завершения после загрузки фотографий.")
+async def baseline_5_bad(message: Message, state: FSMContext):
+    if _means_no_posts(message.text):
+        await _continue_without_best_posts(message, state, baseline=True)
+        return
+    await message.answer(
+        "Отправьте скрин лучшего поста, нажмите кнопку завершения после загрузки "
+        "или выберите «🚫 Постов не было».",
+        reply_markup=content_screens_done_kb("baseline_content_done", "baseline_no_posts"),
+    )
 
 async def _finish_baseline(message: Message, state: FSMContext, telegram_file_id=None):
     d=await state.get_data()
@@ -1117,7 +1164,9 @@ async def wa5(message: Message, state: FSMContext):
     await state.set_state(WeeklyAnalyticsFlow.content_screen)
     await message.answer(
         "Выберите сразу все скрины лучших постов за неделю и отправьте их одним альбомом.\n\n"
-        "Когда всё загрузите, нажмите «✅ Все лучшие посты загружены»."
+        "Когда всё загрузите, нажмите «✅ Все лучшие посты загружены».\n"
+        "Если публикаций не было, нажмите «🚫 Постов не было».",
+        reply_markup=content_screens_done_kb("weekly_content_done", "weekly_no_posts"),
     )
 @router.message(WeeklyAnalyticsFlow.overview_screen)
 async def wa5_bad(message: Message): await message.answer("Нужно отправить изображение.")
@@ -1141,9 +1190,28 @@ async def weekly_content_done(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
+
+@router.callback_query(F.data == "weekly_no_posts")
+async def weekly_no_posts(callback: CallbackQuery, state: FSMContext):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    if await state.get_state() != WeeklyAnalyticsFlow.content_screen.state:
+        await callback.answer("Этот шаг уже завершён.", show_alert=True)
+        return
+    await _continue_without_best_posts(callback.message, state, baseline=False)
+    await callback.answer("Отмечено: постов не было")
+
+
 @router.message(WeeklyAnalyticsFlow.content_screen)
-async def wa6_bad(message: Message):
-    await message.answer("Отправьте скрин лучшего поста или нажмите кнопку завершения после загрузки фотографий.")
+async def wa6_bad(message: Message, state: FSMContext):
+    if _means_no_posts(message.text):
+        await _continue_without_best_posts(message, state, baseline=False)
+        return
+    await message.answer(
+        "Отправьте скрин лучшего поста, нажмите кнопку завершения после загрузки "
+        "или выберите «🚫 Постов не было».",
+        reply_markup=content_screens_done_kb("weekly_content_done", "weekly_no_posts"),
+    )
 
 async def _finish_weekly(message:Message,state:FSMContext,telegram_file_id=None):
     d=await state.get_data()
