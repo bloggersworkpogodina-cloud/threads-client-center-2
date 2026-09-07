@@ -13,7 +13,7 @@ from keyboards import admin_menu, client_card_kb, confirm_client_kb, skip_photo_
 from topics import ensure_topic, topic_log
 from documents import generate_contract_pdf, generate_act_pdf, temp_pdf
 from billing import period, fmt, latest_completed_period
-from posts import send_today_posts
+from posts import POSTS_ALREADY_SENT, send_today_posts
 from weekly_workflow import (
     analytics_week_for,
     content_week_for,
@@ -129,6 +129,19 @@ def content_screens_done_kb(callback_data: str, no_posts_callback: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Все лучшие посты загружены", callback_data=callback_data)],
         [InlineKeyboardButton(text="🚫 Постов не было", callback_data=no_posts_callback)],
+    ])
+
+
+def resend_posts_confirm_kb(client_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔁 Да, отправить повторно",
+            callback_data=f"client_resend_posts:{client_id}",
+        )],
+        [InlineKeyboardButton(
+            text="Отмена",
+            callback_data=f"client_resend_cancel:{client_id}",
+        )],
     ])
 
 
@@ -625,14 +638,60 @@ async def send_posts_now(callback: CallbackQuery):
     if not await is_admin(callback.from_user.id, router):
         return
     client = await DB.get_client(int(callback.data.split(":")[1]))
+    if not client:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
     try:
         ok, text = await send_today_posts(callback.bot, DB, SHEETS, SETTINGS, client, force=False)
     except Exception as exc:
         await callback.message.answer(f"Не удалось отправить ветки:\n{exc}")
         await callback.answer()
         return
-    await callback.message.answer(("✅ " if ok else "ℹ️ ") + text)
+    if not ok and text == POSTS_ALREADY_SENT:
+        await callback.message.answer(
+            f"Ветки для <b>{client['name']}</b> сегодня уже отправлялись.\n\n"
+            "Отправить их повторно?",
+            reply_markup=resend_posts_confirm_kb(client["id"]),
+        )
+    else:
+        await callback.message.answer(("✅ " if ok else "ℹ️ ") + text)
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("client_resend_posts:"))
+async def resend_posts_now(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    client = await DB.get_client(int(callback.data.split(":")[1]))
+    if not client:
+        await callback.answer("Клиент не найден", show_alert=True)
+        return
+
+    await callback.answer("Повторно отправляю…")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    try:
+        ok, text = await send_today_posts(callback.bot, DB, SHEETS, SETTINGS, client, force=True)
+    except Exception as exc:
+        await callback.message.answer(f"Не удалось повторно отправить ветки:\n{exc}")
+        return
+    prefix = "✅ Повторная отправка выполнена. " if ok else "ℹ️ "
+    await callback.message.answer(prefix + text)
+
+
+@router.callback_query(F.data.startswith("client_resend_cancel:"))
+async def resend_posts_cancel(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router):
+        return
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer("Повторная отправка отменена")
+
 
 @router.callback_query(F.data.startswith("client_plan:"))
 async def plan_start(callback: CallbackQuery, state: FSMContext):

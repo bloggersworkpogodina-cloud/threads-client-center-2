@@ -17,5 +17,6 @@ THREADS CLIENT CENTER 2.0 — LOCAL CHECKS
 15. Completed weekly content remains completed after restart: OK
 16. No-posts button for baseline and weekly analytics: OK
 17. Text fallbacks 0 / нет / нет постов: OK
+18. Repeat-send protection, confirmation/cancel buttons and forced resend: OK
 
 Telegram, Railway Volume and real Google Sheets access must be tested after deployment.

@@ -13,6 +13,9 @@ from keyboards import publication_kb
 from topics import topic_log
 
 
+POSTS_ALREADY_SENT = "Ветки на сегодня уже отправлены"
+
+
 def today_for(settings):
     return datetime.now(settings.tz).date()
 
@@ -81,7 +84,7 @@ async def send_today_posts(bot: Bot, db, sheets, settings, client, *, force: boo
     target_date = today_for(settings)
     day = target_date.isoformat()
     if not force and await db.posts_sent(client["id"], day):
-        return False, "Ветки на сегодня уже отправлены"
+        return False, POSTS_ALREADY_SENT
 
     posts = await sheets.read_posts(client["sheet_url"], target_date)
     if not posts:
