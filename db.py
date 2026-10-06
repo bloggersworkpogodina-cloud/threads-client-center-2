@@ -286,6 +286,28 @@ class Database:
                 ("embedded_schema_v1", datetime.utcnow().isoformat()),
             )
             await conn.commit()
+            # Idempotent migration: the original account remains the document owner.
+            columns = {r[1] for r in await (await conn.execute("PRAGMA table_info(clients)")).fetchall()}
+            if "posts_audience" not in columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN posts_audience TEXT NOT NULL DEFAULT 'responsible'")
+            if "responsible_id" not in columns:
+                await conn.execute("ALTER TABLE clients ADD COLUMN responsible_id INTEGER")
+            await conn.executescript("""
+                CREATE TABLE IF NOT EXISTS client_members (
+                    client_id INTEGER NOT NULL REFERENCES clients(id),
+                    telegram_id INTEGER NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(client_id, telegram_id)
+                );
+                CREATE TABLE IF NOT EXISTS post_deliveries (
+                    client_id INTEGER NOT NULL, day TEXT NOT NULL,
+                    telegram_id INTEGER NOT NULL, source_row INTEGER NOT NULL,
+                    PRIMARY KEY(client_id, day, telegram_id, source_row)
+                );
+            """)
+            await conn.execute("INSERT OR IGNORE INTO client_members(client_id,telegram_id) SELECT id,telegram_id FROM clients WHERE telegram_id IS NOT NULL")
+            await conn.execute("UPDATE clients SET responsible_id=telegram_id WHERE responsible_id IS NULL AND telegram_id IS NOT NULL")
+            await conn.commit()
             required = {
                 "clients", "daily_posts", "publication_confirmations",
                 "client_results", "weekly_stats", "client_baseline", "service_acts", "client_events", "client_consents",
@@ -369,21 +391,61 @@ class Database:
 
     async def get_client_by_tg(self, telegram_id: int):
         async with self.connect() as conn:
-            return await (await conn.execute("SELECT * FROM clients WHERE telegram_id = ? AND is_active = 1", (telegram_id,))).fetchone()
+            return await (await conn.execute("SELECT c.* FROM clients c JOIN client_members m ON m.client_id=c.id WHERE m.telegram_id = ? AND c.is_active = 1", (telegram_id,))).fetchone()
 
     async def get_client_by_topic(self, topic_id: int):
         async with self.connect() as conn:
             return await (await conn.execute("SELECT * FROM clients WHERE topic_id = ? AND is_active = 1", (topic_id,))).fetchone()
 
-    async def bind_client(self, invite_code: str, telegram_id: int):
+    async def bind_client(self, invite_code: str, telegram_id: int, display_name: str = ""):
         async with self.connect() as conn:
-            row = await (await conn.execute("SELECT * FROM clients WHERE invite_code = ? AND is_active = 1", (invite_code,))).fetchone()
+            await conn.execute("BEGIN IMMEDIATE")
+            row = await (await conn.execute("SELECT * FROM clients WHERE invite_code=? AND is_active=1", (invite_code,))).fetchone()
             if not row:
                 return None
-            await conn.execute("UPDATE clients SET telegram_id = NULL WHERE telegram_id = ? AND id <> ?", (telegram_id, row["id"]))
-            await conn.execute("UPDATE clients SET telegram_id = ?, updated_at = ? WHERE id = ?", (telegram_id, datetime.utcnow().isoformat(), row["id"]))
+            other = await (await conn.execute("SELECT c.id FROM client_members m JOIN clients c ON c.id=m.client_id WHERE m.telegram_id=? AND c.is_active=1 AND c.id<>?", (telegram_id,row['id']))).fetchone()
+            if other:
+                raise ValueError("Этот Telegram уже подключён к другому активному клиенту. Обратитесь к менеджеру; существующее подключение сохранено.")
+            await conn.execute("INSERT INTO client_members(client_id,telegram_id,display_name) VALUES(?,?,?) ON CONFLICT(client_id,telegram_id) DO UPDATE SET display_name=excluded.display_name", (row['id'],telegram_id,display_name))
+            await conn.execute("UPDATE clients SET telegram_id=COALESCE(telegram_id,?), responsible_id=COALESCE(responsible_id,?) WHERE id=?", (telegram_id,telegram_id,row['id']))
             await conn.commit()
-            return await (await conn.execute("SELECT * FROM clients WHERE id = ?", (row["id"],))).fetchone()
+            return await (await conn.execute("SELECT * FROM clients WHERE id=?", (row['id'],))).fetchone()
+
+    async def list_members(self, client_id):
+        async with self.connect() as conn:
+            return await (await conn.execute("SELECT * FROM client_members WHERE client_id=? ORDER BY telegram_id", (client_id,))).fetchall()
+
+    async def set_posts_audience(self, client_id, audience):
+        if audience not in {"all", "responsible"}:
+            raise ValueError("Неизвестный режим")
+        async with self.connect() as conn:
+            await conn.execute("UPDATE clients SET posts_audience=? WHERE id=?", (audience,client_id))
+            await conn.commit()
+
+    async def set_responsible(self, client_id, telegram_id):
+        async with self.connect() as conn:
+            member = await (await conn.execute("SELECT 1 FROM client_members WHERE client_id=? AND telegram_id=?", (client_id,telegram_id))).fetchone()
+            if not member:
+                raise ValueError("Участник не найден")
+            await conn.execute("UPDATE clients SET responsible_id=? WHERE id=?", (telegram_id,client_id))
+            await conn.commit()
+
+    async def remove_member(self, client_id, telegram_id):
+        async with self.connect() as conn:
+            c = await (await conn.execute("SELECT * FROM clients WHERE id=?", (client_id,))).fetchone()
+            if telegram_id in (c['telegram_id'], c['responsible_id']):
+                raise ValueError("Нельзя удалить владельца документов или текущего ответственного.")
+            await conn.execute("DELETE FROM client_members WHERE client_id=? AND telegram_id=?", (client_id,telegram_id))
+            await conn.commit()
+
+    async def post_delivered(self, client_id, day, telegram_id, source_row):
+        async with self.connect() as conn:
+            return bool(await (await conn.execute("SELECT 1 FROM post_deliveries WHERE client_id=? AND day=? AND telegram_id=? AND source_row=?", (client_id,day,telegram_id,source_row))).fetchone())
+
+    async def mark_post_delivered(self, client_id, day, telegram_id, source_row):
+        async with self.connect() as conn:
+            await conn.execute("INSERT OR IGNORE INTO post_deliveries VALUES(?,?,?,?)", (client_id,day,telegram_id,source_row))
+            await conn.commit()
 
     async def update_client_links(self, client_id: int, *, sheet_url: str | None = None, content_plan_url: str | None = None):
         fields, values = [], []
@@ -468,7 +530,7 @@ class Database:
 
     async def posts_sent(self, client_id: int, post_date: str) -> bool:
         async with self.connect() as conn:
-            row = await (await conn.execute("SELECT 1 FROM daily_posts WHERE client_id=? AND post_date=? LIMIT 1", (client_id, post_date))).fetchone()
+            row = await (await conn.execute("SELECT 1 FROM post_deliveries WHERE client_id=? AND day=? LIMIT 1", (client_id, post_date))).fetchone()
             return bool(row)
 
     async def save_publication_confirmation(self, client_id: int, day: str, total: int, published: int, status: str, comment: str | None = None):

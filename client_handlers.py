@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 import re
-from aiogram import F, Router
+from aiogram import F, Router, BaseMiddleware
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -114,7 +114,10 @@ async def _send_current_documents(message: Message, client):
                 pass
 
 
-async def _begin_documents(message: Message, state: FSMContext, client):
+async def _begin_documents(message: Message, state: FSMContext, client, actor_id=None):
+    if (actor_id or message.from_user.id) != client["telegram_id"]:
+        await _show_client_cabinet(message)
+        return
     if await DB.documents_fully_accepted(client["id"]):
         await _show_client_cabinet(message)
         return
@@ -166,14 +169,13 @@ async def start(message: Message, state: FSMContext):
         await message.answer("Админ-центр Threads Client Center 2.0", reply_markup=admin_menu())
         return
 
-    current = await db.get_client_by_tg(message.from_user.id)
-    if current:
-        await _begin_documents(message, state, current)
-        return
-
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) == 2 and parts[1].startswith("invite_"):
-        c = await db.bind_client(parts[1][7:], message.from_user.id)
+        try:
+            c = await db.bind_client(parts[1][7:], message.from_user.id, message.from_user.full_name)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
         if c:
             await db.log_event(c["id"], "client_bound")
             await topic_log(
@@ -187,6 +189,11 @@ async def start(message: Message, state: FSMContext):
             await _begin_documents(message, state, c)
             return
 
+    if len(parts) == 1:
+        current = await db.get_client_by_tg(message.from_user.id)
+        if current:
+            await _begin_documents(message, state, current)
+            return
     await message.answer("Ссылка подключения недействительна или кабинет ещё не создан.")
 
 
@@ -202,7 +209,7 @@ async def docs_begin(callback: CallbackQuery, state: FSMContext):
     await callback.answer("Открываю документы…")
 
     try:
-        await _begin_documents(callback.message, state, c)
+        await _begin_documents(callback.message, state, c, actor_id=callback.from_user.id)
     except Exception:
         import logging
         logging.exception("Не удалось открыть/сформировать документы клиента %s", c["id"])
@@ -406,7 +413,7 @@ async def contract_accept(callback: CallbackQuery, state: FSMContext):
         return
     if not c["contract_file_id"] or not c["policy_file_id"]:
         await callback.answer("Документы нужно сформировать заново", show_alert=True)
-        await _begin_documents(callback.message, state, c)
+        await _begin_documents(callback.message, state, c, actor_id=callback.from_user.id)
         return
 
     await DB.save_contract_acceptance(
@@ -651,6 +658,9 @@ async def res3(m:Message,s:FSMContext):
 async def publication(callback:CallbackQuery,state:FSMContext):
     _,status,day=callback.data.split(":"); c=await DB.get_client_by_tg(callback.from_user.id)
     if not c: return
+    if callback.from_user.id != c["responsible_id"]:
+        await callback.answer("Публикацию подтверждает ответственный.", show_alert=True)
+        return
     total = await DB.count_posts_for_day(c["id"], day)
     if status=="partial":
         await state.update_data(day=day,total=total,client_id=c["id"]); await state.set_state(PartialPublication.count); await callback.message.answer("Сколько веток опубликовано?"); await callback.answer(); return
@@ -742,3 +752,31 @@ async def client_direct_message_bridge(message: Message, state: FSMContext):
         await message.answer(
             "Не удалось передать сообщение менеджеру. Попробуйте ещё раз чуть позже."
         )
+
+
+class MemberDocumentGuard(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user and DB:
+            c = await DB.get_client_by_tg(user.id)
+            state = data.get("state")
+            state_name = (await state.get_state()) if state else None
+            if not c and state_name and user.id != SETTINGS.admin_id:
+                await state.clear()
+                await event.answer("Подключение не найдено. Обратитесь к менеджеру.")
+                return
+            if c and state_name == "PartialPublication:count" and c["responsible_id"] != user.id:
+                await state.clear()
+                await event.answer("Публикацию подтверждает ответственный.")
+                return
+            if c and c["telegram_id"] != user.id:
+                callback = getattr(event, "data", "") or ""
+                state = data.get("state")
+                state_name = (await state.get_state()) if state else None
+                if callback.startswith(("docs_begin", "legal_type:", "contract_accept", "pd_consent_accept", "act_accept:", "act_remark:")) or (state_name and state_name.startswith(("ConsentFlow:", "ActRemarkFlow:"))):
+                    await event.answer("Документы оформляет основной клиент.")
+                    return
+        return await handler(event, data)
+
+router.message.outer_middleware(MemberDocumentGuard())
+router.callback_query.outer_middleware(MemberDocumentGuard())

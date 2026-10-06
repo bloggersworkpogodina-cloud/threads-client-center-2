@@ -644,7 +644,7 @@ async def send_posts_now(callback: CallbackQuery):
     try:
         ok, text = await send_today_posts(callback.bot, DB, SHEETS, SETTINGS, client, force=False)
     except Exception as exc:
-        await callback.message.answer(f"Не удалось отправить ветки:\n{exc}")
+        await callback.message.answer(f"Не удалось отправить ветки:\n{exc}", parse_mode=None)
         await callback.answer()
         return
     if not ok and text == POSTS_ALREADY_SENT:
@@ -654,7 +654,7 @@ async def send_posts_now(callback: CallbackQuery):
             reply_markup=resend_posts_confirm_kb(client["id"]),
         )
     else:
-        await callback.message.answer(("✅ " if ok else "ℹ️ ") + text)
+        await callback.message.answer(("✅ " if ok else "ℹ️ ") + text, parse_mode=None)
     await callback.answer()
 
 
@@ -679,7 +679,7 @@ async def resend_posts_now(callback: CallbackQuery):
         await callback.message.answer(f"Не удалось повторно отправить ветки:\n{exc}")
         return
     prefix = "✅ Повторная отправка выполнена. " if ok else "ℹ️ "
-    await callback.message.answer(prefix + text)
+    await callback.message.answer(prefix + text, parse_mode=None)
 
 
 @router.callback_query(F.data.startswith("client_resend_cancel:"))
@@ -1770,3 +1770,51 @@ async def client_docs_policy_save(message: Message, state: FSMContext):
 @router.message(ClientDocsFlow.policy)
 async def client_docs_policy_bad(message: Message):
     await message.answer("Пришлите политику именно PDF-файлом.")
+
+
+async def show_members(message, client_id):
+    from html import escape
+    c = await DB.get_client(client_id)
+    if not c:
+        await message.answer("Клиент не найден")
+        return
+    members = await DB.list_members(client_id)
+    lines = [f"👥 <b>{escape(c['name'])}</b>", "Ветки: " + ("всем участникам" if c['posts_audience']=='all' else "только ответственному")]
+    buttons = []
+    for m in members:
+        uid = m['telegram_id']
+        label = m['display_name'] or str(uid)
+        lines.append(f"{'⭐' if uid == c['responsible_id'] else '👤'} {escape(label)} ({uid})")
+        if uid != c['responsible_id']:
+            buttons.append([InlineKeyboardButton(text=f"⭐ Назначить: {label}"[:60], callback_data=f"member_owner:{client_id}:{uid}")])
+        if uid not in (c['telegram_id'], c['responsible_id']):
+            buttons.append([InlineKeyboardButton(text=f"Удалить: {label}"[:60], callback_data=f"member_remove:{client_id}:{uid}")])
+    buttons += [
+        [InlineKeyboardButton(text="Всем",callback_data=f"member_mode:{client_id}:all"), InlineKeyboardButton(text="Ответственному",callback_data=f"member_mode:{client_id}:responsible")],
+        [InlineKeyboardButton(text="🔗 Пригласить участника",callback_data=f"client_invite:{client_id}")],
+        [InlineKeyboardButton(text="🔄 Обновить",callback_data=f"members:{client_id}")],
+    ]
+    await message.answer("\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@router.callback_query(F.data.startswith("members:"))
+async def members_view(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router): return
+    await callback.answer()
+    await show_members(callback.message, int(callback.data.split(':')[1]))
+
+
+@router.callback_query(F.data.startswith("member_"))
+async def members_change(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id, router): return
+    action, cid, value = callback.data.split(':')
+    cid = int(cid)
+    try:
+        if action == 'member_mode': await DB.set_posts_audience(cid, value)
+        elif action == 'member_owner': await DB.set_responsible(cid, int(value))
+        elif action == 'member_remove': await DB.remove_member(cid, int(value))
+    except ValueError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer("Сохранено")
+    await show_members(callback.message, cid)
