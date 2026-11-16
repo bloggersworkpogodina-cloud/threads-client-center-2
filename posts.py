@@ -96,9 +96,17 @@ async def _send_today_posts(bot: Bot, db, sheets, settings, client, *, force: bo
 
     target_date = today_for(settings)
     day = target_date.isoformat()
-    posts = await sheets.read_posts(client["sheet_url"], target_date)
-    if not posts:
-        return False, "На сегодня нет строк со статусом «Готово»"
+    if hasattr(sheets, "read_posts_with_diagnostics"):
+        read_result = await sheets.read_posts_with_diagnostics(client["sheet_url"], target_date)
+        posts = read_result.posts
+        if not posts:
+            details = {**read_result.diagnostics, "timezone": settings.timezone}
+            await db.log_event(client["id"], "posts_not_found", details)
+            return False, read_result.empty_message() + f"\nЧасовой пояс бота: {settings.timezone}."
+    else:
+        posts = await sheets.read_posts(client["sheet_url"], target_date)
+        if not posts:
+            return False, f"На {target_date.strftime('%d.%m.%Y')} нет строк со статусом «Готово»"
 
     rows = await db.save_posts(client["id"], day, posts)
 
